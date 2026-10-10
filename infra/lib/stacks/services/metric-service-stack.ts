@@ -24,12 +24,17 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { AccessLogsBucket, SclMonitoring } from "../../constructs";
 import { Paths, fromRoot } from "../../paths";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
-import { resolveContext } from "../../context";
+import {
+  isDynamoDbMetadataStore,
+  METADATA_STORE_DYNAMODB,
+  resolveContext,
+} from "../../context";
 import {
   DEFAULT_EVENT_BUS_NAME,
   DEFAULT_BEDROCK_MODEL_ID,
   DEFAULT_GRAPH_URI_BASE,
 } from "../../constants";
+import { TABLE_NAMES } from "@coa/shared";
 import { bundlePython } from "../../utils/python-bundling";
 import { bedrockModelArn } from "../../utils/bedrock-utils";
 
@@ -98,14 +103,47 @@ export class MetricServiceStack extends SCLStack {
       this,
       `${ssmPrefix}/namespace/namespaces-table-name`,
     );
-    const smusDomainId = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/domain-id`,
-    );
-    const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/dz-project-access-role-arn`,
-    );
+    // Table-metadata store read by metric validation and import. DataZone:
+    // the SMUS domain id plus the shared project access role, assumed for
+    // catalog reads. DynamoDB (metadata_store=dynamodb): NamespaceStack's
+    // metadata-assets table.
+    let metadataStoreEnv: Record<string, string>;
+    let grantMetadataStore: (fn: lambda.Function) => void;
+    if (isDynamoDbMetadataStore(this.node)) {
+      const metadataAssetsTable = dynamodb.Table.fromTableAttributes(
+        this,
+        "MetadataAssetsTable",
+        {
+          tableName: this.prefixed(TABLE_NAMES.METADATA_ASSETS),
+          globalIndexes: ["AssetById"],
+        },
+      );
+      metadataStoreEnv = {
+        METADATA_STORE_BACKEND: METADATA_STORE_DYNAMODB,
+        METADATA_STORE_TABLE: metadataAssetsTable.tableName,
+      };
+      grantMetadataStore = (fn) => metadataAssetsTable.grantReadData(fn);
+    } else {
+      const smusDomainId = ssm.StringParameter.valueForStringParameter(
+        this,
+        `${ssmPrefix}/smus/domain-id`,
+      );
+      const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
+        this,
+        `${ssmPrefix}/smus/dz-project-access-role-arn`,
+      );
+      metadataStoreEnv = {
+        SMUS_DOMAIN_ID: smusDomainId,
+        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+      };
+      grantMetadataStore = (fn) =>
+        fn.addToRolePolicy(
+          new iam.PolicyStatement({
+            actions: ["sts:AssumeRole"],
+            resources: [projectAccessRoleArn],
+          }),
+        );
+    }
 
     // ── Lambda code bundle ─────────────────────────────────────────
     const lambdaCode = bundlePython({
@@ -175,8 +213,7 @@ export class MetricServiceStack extends SCLStack {
         // SMUS catalog access — metric validation Checks 2-5
         DATA_SOURCES_TABLE: sourcesTableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: smusDomainId,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv,
       },
     });
 
@@ -250,12 +287,7 @@ export class MetricServiceStack extends SCLStack {
     );
     namespacesTable.grantReadData(this.metricApiFn);
 
-    this.metricApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["sts:AssumeRole"],
-        resources: [projectAccessRoleArn],
-      }),
-    );
+    grantMetadataStore(this.metricApiFn);
 
     // ── AOSS VPC endpoint access ──────────────────────────────────
     // Allow the Lambda security group to reach the AOSS VPC endpoint
@@ -370,8 +402,7 @@ export class MetricServiceStack extends SCLStack {
         // fallback and now fails the job (fail-closed).
         DATA_SOURCES_TABLE: sourcesTableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: smusDomainId,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv,
       },
     });
 
@@ -436,12 +467,7 @@ export class MetricServiceStack extends SCLStack {
     // SMUS catalog access — same grants as the API Lambda
     sourcesTable.grantReadData(importWorkerFn);
     namespacesTable.grantReadData(importWorkerFn);
-    importWorkerFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["sts:AssumeRole"],
-        resources: [projectAccessRoleArn],
-      }),
-    );
+    grantMetadataStore(importWorkerFn);
 
     importWorkerFn.addToRolePolicy(
       new iam.PolicyStatement({

@@ -8,7 +8,7 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 import { SCLStack } from "../../constructs";
-import { resolveContext } from "../../context";
+import { isDynamoDbMetadataStore, resolveContext } from "../../context";
 import {
   JdbcConnectivity,
   type PeeringConfig,
@@ -205,10 +205,13 @@ export class NetworkStack extends SCLStack {
         service: ec2.InterfaceVpcEndpointAwsService.ECS,
         privateDnsEnabled: true,
       });
-      createdVpc.addInterfaceEndpoint("DataZoneEndpoint", {
-        service: ec2.InterfaceVpcEndpointAwsService.DATAZONE,
-        privateDnsEnabled: true,
-      });
+      // Not needed with the DynamoDB metadata store (no DataZone domain).
+      if (!isDynamoDbMetadataStore(this.node)) {
+        createdVpc.addInterfaceEndpoint("DataZoneEndpoint", {
+          service: ec2.InterfaceVpcEndpointAwsService.DATAZONE,
+          privateDnsEnabled: true,
+        });
+      }
       // Neptune Analytics (neptune-graph) — control + data plane.
       createdVpc.addInterfaceEndpoint("NeptuneGraphEndpoint", {
         service: ec2.InterfaceVpcEndpointAwsService.NEPTUNE_ANALYTICS,

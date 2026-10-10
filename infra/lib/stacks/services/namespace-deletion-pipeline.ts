@@ -43,6 +43,11 @@ import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { Construct } from "constructs";
+import { TABLE_NAMES } from "@coa/shared";
+import {
+  isDynamoDbMetadataStore,
+  METADATA_STORE_DYNAMODB,
+} from "../../context";
 
 export interface NamespaceDeletionPipelineProps {
   /** Prefixed name helper from SCLStack. */
@@ -83,6 +88,7 @@ export interface NamespaceDeletionPipelineProps {
   readonly opensearchEndpoint?: string;
   readonly opensearchCollectionName?: string;
 
+  /** Ignored with the DynamoDB metadata store (`metadata_store=dynamodb`). */
   readonly datazoneDomainId?: string;
   /**
    * ARN of namespaceApiFn's own execution role. DeletePlatform assumes
@@ -91,7 +97,8 @@ export interface NamespaceDeletionPipelineProps {
    * the role that actually calls CreateProject (see service.py's
    * NamespaceService.create), so it is the principal DataZone will
    * authorize for DeleteProject. Plain IAM permission on the action
-   * alone (with a non-owner caller) is not sufficient.
+   * alone (with a non-owner caller) is not sufficient. Ignored with the
+   * DynamoDB metadata store.
    */
   readonly namespaceApiFnRoleArn?: string;
   readonly vkgClusterArn?: string;
@@ -118,6 +125,16 @@ export class NamespaceDeletionPipeline extends Construct {
 
     const region = cdk.Stack.of(this).region;
     const account = cdk.Stack.of(this).account;
+
+    // With the DynamoDB metadata store there is no DataZone project to
+    // delete: DeletePlatform removes the namespace's items from the
+    // metadata-assets table instead, and the DataZone props are ignored.
+    const dynamoDbStore = isDynamoDbMetadataStore(this.node);
+    const datazoneDomainId = dynamoDbStore ? undefined : props.datazoneDomainId;
+    const namespaceApiFnRoleArn = dynamoDbStore
+      ? undefined
+      : props.namespaceApiFnRoleArn;
+    const metadataAssetsTableName = props.prefixed(TABLE_NAMES.METADATA_ASSETS);
 
     const commonLambdaProps = {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -254,11 +271,15 @@ export class NamespaceDeletionPipeline extends Construct {
         RESOURCE_ROLE_MAPPINGS_TABLE: props.resourceRoleMappingsTable.tableName,
         ROLES_TABLE: props.rolesTable.tableName,
         RESOURCE_PREFIX: props.resourcePrefix,
-        ...(props.datazoneDomainId && {
-          DATAZONE_DOMAIN_ID: props.datazoneDomainId,
+        ...(datazoneDomainId && {
+          DATAZONE_DOMAIN_ID: datazoneDomainId,
         }),
-        ...(props.namespaceApiFnRoleArn && {
-          PROJECT_ACCESS_ROLE_ARN: props.namespaceApiFnRoleArn,
+        ...(namespaceApiFnRoleArn && {
+          PROJECT_ACCESS_ROLE_ARN: namespaceApiFnRoleArn,
+        }),
+        ...(dynamoDbStore && {
+          METADATA_STORE_BACKEND: METADATA_STORE_DYNAMODB,
+          METADATA_STORE_TABLE: metadataAssetsTableName,
         }),
         ...(props.vkgClusterArn && { VKG_CLUSTER_ARN: props.vkgClusterArn }),
         ...(props.cloudMapNamespaceId && {
@@ -275,7 +296,23 @@ export class NamespaceDeletionPipeline extends Construct {
         resources: [`arn:aws:athena:${region}:${account}:workgroup/*`],
       }),
     );
-    if (props.namespaceApiFnRoleArn) {
+    if (dynamoDbStore) {
+      // Find the namespace's asset items (base table or GSI) and delete them.
+      deletePlatformFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "dynamodb:Query",
+            "dynamodb:DeleteItem",
+            "dynamodb:BatchWriteItem",
+          ],
+          resources: [
+            `arn:aws:dynamodb:${region}:${account}:table/${metadataAssetsTableName}`,
+            `arn:aws:dynamodb:${region}:${account}:table/${metadataAssetsTableName}/index/*`,
+          ],
+        }),
+      );
+    }
+    if (namespaceApiFnRoleArn) {
       // DataZone requires the caller to be the project *owner* for
       // DeleteProject — plain IAM permission on the action is not
       // sufficient. namespaceApiFn's role is the actual owner (it called
@@ -289,7 +326,7 @@ export class NamespaceDeletionPipeline extends Construct {
       deletePlatformFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["sts:AssumeRole"],
-          resources: [props.namespaceApiFnRoleArn],
+          resources: [namespaceApiFnRoleArn],
         }),
       );
     }

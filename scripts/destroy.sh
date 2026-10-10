@@ -429,6 +429,10 @@ DOMAIN_ID=$(aws ssm get-parameter --name "${SSM_PREFIX}/smus/domain-id" \
 
 if [ -z "$DOMAIN_ID" ] || [ "$DOMAIN_ID" == "None" ]; then
   ok "No DataZone domain ID found in SSM — already deleted or never deployed."
+elif [ "$DOMAIN_ID" == "NO_DATAZONE_DOMAIN" ]; then
+  # Placeholder NamespaceStack publishes with metadata_store=dynamodb: there
+  # is no domain, and the metadata-assets table goes with 'cdk destroy'.
+  ok "No DataZone domain deployed (DynamoDB metadata store) — nothing to delete."
 else
   # CFN already calls DeleteProject with skipDeletionCheck=true internally
   # (confirmed via CloudTrail), but that cascade stops at cross-project

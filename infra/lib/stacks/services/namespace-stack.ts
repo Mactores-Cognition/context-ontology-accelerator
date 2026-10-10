@@ -15,7 +15,12 @@ import { Construct } from "constructs";
 import { SCLStack } from "../../constructs/scl-stack";
 import { DynamoDBTable } from "../../constructs/dynamodb-table";
 import { Paths, fromRoot } from "../../paths";
-import { resolveContext } from "../../context";
+import {
+  isDynamoDbMetadataStore,
+  METADATA_STORE_DYNAMODB,
+  NO_DATAZONE_DOMAIN,
+  resolveContext,
+} from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NamespaceDeletionPipeline } from "./namespace-deletion-pipeline";
 import { TABLE_NAMES } from "@coa/shared";
@@ -47,6 +52,13 @@ export interface NamespaceStackProps extends cdk.StackProps {
   readonly ontologyEngineEndpoint?: string;
 }
 
+/** DataZone resources the rest of NamespaceStack builds on. */
+interface DataZoneDomain {
+  readonly domain: datazone.CfnDomain;
+  readonly executionRole: iam.Role;
+  readonly projectProfileId: string;
+}
+
 /**
  * Service stack: Namespace management infrastructure.
  *
@@ -57,9 +69,14 @@ export interface NamespaceStackProps extends cdk.StackProps {
  *
  * Outputs the domain ID to SSM at `/{prefix}/smus/domain-id` so that
  * runtime code (control-plane Python package) can discover it.
+ *
+ * With `metadata_store=dynamodb` the SMUS domain is replaced by a
+ * metadata-assets DynamoDB table (name published to
+ * `/{prefix}/metadata-store/table-name`), and `/{prefix}/smus/domain-id`
+ * holds the NO_DATAZONE_DOMAIN placeholder.
  */
 export class NamespaceStack extends SCLStack {
-  /** The SMUS domain ID. */
+  /** The SMUS domain ID, or NO_DATAZONE_DOMAIN with the DynamoDB metadata store. */
   public readonly domainId: string;
 
   /** Namespaces table. */
@@ -101,6 +118,410 @@ export class NamespaceStack extends SCLStack {
     });
     this.namespacesTable = namespaces.table;
 
+    // ── Table-metadata store: SMUS (DataZone) domain, or DynamoDB ──
+    const dynamoDbStore = isDynamoDbMetadataStore(this.node);
+    const dataZone = dynamoDbStore
+      ? undefined
+      : this.createDataZoneDomain(ssmPrefix);
+    let metadataAssets: dynamodb.Table | undefined;
+    if (dynamoDbStore) {
+      // One item per scanned table, keyed by namespace (PK) and asset (SK);
+      // AssetById resolves the asset ids handed out to API callers.
+      const assets = new DynamoDBTable(this, "MetadataAssetsTable", {
+        tableName: TABLE_NAMES.METADATA_ASSETS,
+        partitionKey: PK,
+        sortKey: SK,
+      });
+      assets.addGlobalSecondaryIndex({
+        indexName: "AssetById",
+        partitionKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      });
+      metadataAssets = assets.table;
+    }
+    this.domainId = dataZone?.domain.attrId ?? NO_DATAZONE_DOMAIN;
+
+    // ── Shared Lambda code bundle ─────────────────────────────────
+    const lambdaCode = bundlePython({
+      srcDirs: [
+        Paths.controlPlaneSrc,
+        Paths.commonLib,
+        Paths.smithyGeneratedControlPlanePythonServer,
+      ],
+      requirementsFile: fromRoot("packages/control-plane/requirements.txt"),
+    });
+
+    // ── Namespace API Lambda (combined create + list + delete-trigger) ──
+    // Defined before the deletion pipeline so its role ARN can be passed in
+    // (DeletePlatform assumes it for datazone:DeleteProject — see below and
+    // cleanup.delete_smu_project). DELETION_STATE_MACHINE_ARN is a Lazy
+    // token since the pipeline is constructed after this Lambda but this
+    // Lambda's environment needs the pipeline's ARN; CDK resolves Lazy
+    // values at synth time once every construct has been created, so the
+    // circular-looking reference is safe.
+    const namespaceApiFn: lambda.Function = new lambda.Function(
+      this,
+      "NamespaceApiFn",
+      {
+        functionName: this.prefixed("namespace-api"),
+        runtime: lambda.Runtime.PYTHON_3_12,
+        handler: "coa_control_plane.namespace.namespace_api_handler.handler",
+        code: lambdaCode,
+        timeout: cdk.Duration.seconds(15),
+        memorySize: 256,
+        vpc: props.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [props.lambdaSecurityGroup],
+        environment: {
+          NAMESPACES_TABLE: namespaces.table.tableName,
+          ROLES_TABLE: props.rolesTable.tableName,
+          RESOURCE_ROLE_MAPPINGS_TABLE:
+            props.resourceRoleMappingsTable.tableName,
+          SOURCES_TABLE: this.prefixed(TABLE_NAMES.SOURCES),
+          METRIC_IMPORT_JOBS_TABLE: this.prefixed(
+            TABLE_NAMES.METRIC_IMPORT_JOBS,
+          ),
+          ...(dataZone
+            ? {
+                DATAZONE_DOMAIN_ID: dataZone.domain.attrId,
+                DATAZONE_PROJECT_PROFILE_ID: dataZone.projectProfileId,
+              }
+            : {
+                METADATA_STORE_BACKEND: METADATA_STORE_DYNAMODB,
+                METADATA_STORE_TABLE: metadataAssets!.tableName,
+              }),
+          ALLOWED_ORIGIN: allowedOrigin,
+          ...(dataZone && {
+            PROJECT_ACCESS_ROLE_ARN_SSM: `${ssmPrefix}/smus/dz-project-access-role-arn`,
+          }),
+          ATHENA_RESULTS_BUCKET_SSM: `${ssmPrefix}/query/athena-results-bucket`,
+          RESOURCE_PREFIX: this.prefixed(""),
+          TAG_PREFIX: resolveContext(this.node).prefix,
+          DELETION_STATE_MACHINE_ARN: cdk.Lazy.string({
+            produce: (): string =>
+              deletionPipeline.stateMachine.stateMachineArn,
+          }),
+          ...(props.ontologyEngineEndpoint && {
+            ONTOLOGY_ENGINE_ENDPOINT: props.ontologyEngineEndpoint,
+          }),
+          // Lets get_handler resolve VKG service health from ECS
+          // (resolve_vkg_health). Absent this var the resolver short-circuits
+          // to UNKNOWN for every namespace.
+          ...(props.vkgClusterArn && {
+            VKG_CLUSTER_ARN: props.vkgClusterArn,
+          }),
+        },
+      },
+    );
+
+    namespaces.table.grantReadWriteData(namespaceApiFn);
+    props.rolesTable.grantReadWriteData(namespaceApiFn);
+    props.resourceRoleMappingsTable.grantReadWriteData(namespaceApiFn);
+    metadataAssets?.grantReadWriteData(namespaceApiFn);
+
+    // Precondition checks for delete: read-only queries to detect active
+    // operations that could race with the deletion pipeline's cleanup.
+    // - SOURCES_TABLE ByNamespace GSI: sources actively scanning/enriching.
+    // - METRIC_IMPORT_JOBS_TABLE: IN_PROGRESS import jobs (#215 — completed/
+    //   failed jobs no longer block deletion).
+    // Ontology induction jobs are checked via an HTTP call to the
+    // ontology-engine (see delete_handler._check_active_induction_jobs) —
+    // no DynamoDB grant needed for that check.
+    namespaceApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:Query"],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/${this.prefixed(TABLE_NAMES.SOURCES)}/index/ByNamespace`,
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/${this.prefixed(TABLE_NAMES.METRIC_IMPORT_JOBS)}`,
+        ],
+      }),
+    );
+
+    namespaceApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["dynamodb:TransactWriteItems"],
+        resources: [
+          namespaces.table.tableArn,
+          props.rolesTable.tableArn,
+          props.resourceRoleMappingsTable.tableArn,
+        ],
+      }),
+    );
+    if (dataZone) {
+      namespaceApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "datazone:CreateProject",
+            "datazone:CreateProjectMembership",
+            "datazone:DeleteProject",
+          ],
+          resources: ["*"], // V2 domains require wildcard — project doesn't exist yet to scope to
+        }),
+      );
+    }
+    namespaceApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:GetRole"],
+        resources: [`arn:aws:iam::${this.account}:role/${this.prefixed("*")}`],
+      }),
+    );
+    namespaceApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/smus/*`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/query/*`,
+        ],
+      }),
+    );
+
+    // Athena workgroup creation (deletion moved to the deletion pipeline's
+    // DeletePlatform step — see namespace-deletion-pipeline.ts).
+    namespaceApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "athena:CreateWorkGroup",
+          "athena:GetWorkGroup",
+          "athena:TagResource",
+        ],
+        resources: [
+          `arn:aws:athena:${this.region}:${this.account}:workgroup/${this.prefixed("*")}`,
+        ],
+      }),
+    );
+
+    // Read-time VKG health resolution (GetNamespace -> resolve_vkg_health)
+    // calls ecs:DescribeServices, then ecs:ListTasks + ecs:DescribeTasks to
+    // read the container's functional-probe healthStatus (a running task is not
+    // necessarily able to translate — #170). All scoped to the VKG cluster via
+    // the ecs:cluster condition, mirroring the deletion pipeline grant.
+    if (props.vkgClusterArn) {
+      namespaceApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "ecs:DescribeServices",
+            "ecs:ListTasks",
+            "ecs:DescribeTasks",
+          ],
+          resources: ["*"],
+          conditions: { ArnLike: { "ecs:cluster": props.vkgClusterArn } },
+        }),
+      );
+    }
+
+    this.namespaceApiFn = namespaceApiFn;
+
+    // ── Namespace deletion Step Functions pipeline ──────────────────
+    // sources-api / metric-api function names are constructed by naming
+    // convention (this.prefixed(...)), not a CDK cross-stack reference,
+    // because SourcesStack/MetricServiceStack deploy *after* NamespaceStack
+    // (see bin/app.ts) — the same pattern OntologyStack already uses to
+    // invoke sources-api (see ontology-stack.ts).
+    // GraphRAG doc-KG index teardown needs the AOSS collection. Both params are
+    // written by the storage stack; the read requires an explicit
+    // addDependency() in bin/app.ts because CDK cannot infer ordering from
+    // valueForStringParameter.
+    const opensearchEndpoint = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/opensearch/endpoint`,
+    );
+    const opensearchCollectionName =
+      ssm.StringParameter.valueForStringParameter(
+        this,
+        `${ssmPrefix}/opensearch/collection-name`,
+      );
+
+    const deletionPipeline: NamespaceDeletionPipeline =
+      new NamespaceDeletionPipeline(this, "DeletionPipeline", {
+        prefixed: (name: string) => this.prefixed(name),
+        lambdaCode,
+        vpc: props.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [props.lambdaSecurityGroup],
+        namespacesTable: namespaces.table,
+        resourceRoleMappingsTable: props.resourceRoleMappingsTable,
+        rolesTable: props.rolesTable,
+        sourcesApiFnName: this.prefixed("sources-api"),
+        metricApiFnName: this.prefixed("metric-api"),
+        datazoneDomainId: dataZone?.domain.attrId,
+        // DeletePlatform assumes namespaceApiFn's own execution role for
+        // datazone:DeleteProject — DataZone records the CreateProject
+        // caller as the project's owner, and namespaceApiFn is the role
+        // that actually calls CreateProject (see service.py's
+        // NamespaceService.create -> SMUSClient.create_project). Assuming
+        // DzProjectAccessRole instead would require also granting it
+        // PROJECT_OWNER membership, which is a broader, separate change —
+        // this reuses the ownership DataZone already grants for free.
+        namespaceApiFnRoleArn: dataZone
+          ? namespaceApiFn.role!.roleArn
+          : undefined,
+        vkgClusterArn: props.vkgClusterArn,
+        cloudMapNamespaceId: props.cloudMapNamespaceId,
+        ontologyBucketName: props.ontologyBucketName,
+        ontologyEngineEndpoint: props.ontologyEngineEndpoint,
+        // For dropping the namespace's GraphRAG doc-KG indexes on teardown.
+        // Read from SSM (the storage stack writes both) — see bin/app.ts for
+        // the explicit addDependency this read requires, since CDK cannot infer
+        // ordering from valueForStringParameter.
+        opensearchEndpoint,
+        opensearchCollectionName,
+        resourcePrefix: this.prefixed(""),
+      });
+
+    // Start the deletion pipeline's Step Functions execution.
+    deletionPipeline.stateMachine.grantStartExecution(namespaceApiFn);
+
+    // Allow DeletePlatform to assume this Lambda's own execution role.
+    // grantAssumeRole only adds an identity policy on the *grantee* — it
+    // does NOT modify the target role's trust policy.  We need both sides:
+    //  1. Identity policy on DeletePlatformFn (already in namespace-deletion-pipeline.ts)
+    //  2. Trust policy on namespaceApiFn's role (added here)
+    // Not needed with the DynamoDB metadata store (no DataZone project).
+    if (dataZone) {
+      (namespaceApiFn.role! as iam.Role).assumeRolePolicy!.addStatements(
+        new iam.PolicyStatement({
+          actions: ["sts:AssumeRole"],
+          principals: [
+            new iam.ArnPrincipal(
+              deletionPipeline.deletePlatformFn.role!.roleArn,
+            ),
+          ],
+        }),
+      );
+    }
+
+    // ── Roles API Lambda (list platform roles + list/get namespace roles) ──
+    const rolesApiFn = new lambda.Function(this, "RolesApiFn", {
+      functionName: this.prefixed("roles-api"),
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "coa_control_plane.roles.namespace_roles_handler.handler",
+      code: lambdaCode,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ROLES_TABLE: props.rolesTable.tableName,
+        ALLOWED_ORIGIN: allowedOrigin,
+      },
+    });
+    props.rolesTable.grantReadData(rolesApiFn);
+
+    const platformRolesApiFn = new lambda.Function(this, "PlatformRolesApiFn", {
+      functionName: this.prefixed("platform-roles-api"),
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "coa_control_plane.roles.list_platform_roles_handler.handler",
+      code: lambdaCode,
+      timeout: cdk.Duration.seconds(5),
+      memorySize: 256,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ROLES_TABLE: props.rolesTable.tableName,
+        ALLOWED_ORIGIN: allowedOrigin,
+      },
+    });
+    props.rolesTable.grantReadData(platformRolesApiFn);
+
+    this.rolesApiFn = rolesApiFn;
+    this.platformRolesApiFn = platformRolesApiFn;
+
+    // ── Grants API Lambda (CRUD for grants) ──────────────────────────
+    const grantsApiFn = new lambda.Function(this, "GrantsApiFn", {
+      functionName: this.prefixed("grants-api"),
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "coa_control_plane.grants.grants_handler.handler",
+      code: lambdaCode,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ROLES_TABLE: props.rolesTable.tableName,
+        RESOURCE_ROLE_MAPPINGS_TABLE: props.resourceRoleMappingsTable.tableName,
+        ALLOWED_ORIGIN: allowedOrigin,
+      },
+    });
+    props.rolesTable.grantReadData(grantsApiFn);
+    props.resourceRoleMappingsTable.grantReadWriteData(grantsApiFn);
+
+    this.grantsApiFn = grantsApiFn;
+
+    const loginRole = dataZone
+      ? this.registerDataZoneUsers(dataZone, namespaceApiFn)
+      : undefined;
+
+    // ── Publish domain ID to SSM ─────────────────────────────────
+    // Other stacks read this parameter at deploy time, so the DynamoDB
+    // metadata store publishes the NO_DATAZONE_DOMAIN placeholder instead.
+    new ssm.StringParameter(this, "SsmDomainId", {
+      parameterName: `${ssmPrefix}/smus/domain-id`,
+      stringValue: this.domainId,
+      description: dataZone
+        ? "SageMaker Unified Studio domain ID"
+        : "Placeholder: no DataZone domain (DynamoDB metadata store)",
+    });
+
+    if (metadataAssets) {
+      new ssm.StringParameter(this, "SsmMetadataAssetsTableName", {
+        parameterName: `${ssmPrefix}/metadata-store/table-name`,
+        stringValue: metadataAssets.tableName,
+        description: "Metadata assets DynamoDB table name",
+      });
+    }
+
+    new ssm.StringParameter(this, "SsmNamespacesTableName", {
+      parameterName: `${ssmPrefix}/namespace/namespaces-table-name`,
+      stringValue: this.namespacesTable.tableName,
+      description: "Namespaces DynamoDB table name",
+    });
+
+    if (loginRole) {
+      new ssm.StringParameter(this, "SsmLoginRoleArn", {
+        parameterName: `${ssmPrefix}/smus/login-role-arn`,
+        stringValue: loginRole.roleArn,
+        description: "SMUS admin login role ARN",
+      });
+    }
+
+    new ssm.StringParameter(this, "SsmNamespaceApiFnArn", {
+      parameterName: `${ssmPrefix}/namespace/api-fn-arn`,
+      stringValue: namespaceApiFn.functionArn,
+      description: "Namespace API Lambda ARN",
+    });
+
+    new ssm.StringParameter(this, "SsmRolesApiFnArn", {
+      parameterName: `${ssmPrefix}/namespace/roles-api-fn-arn`,
+      stringValue: rolesApiFn.functionArn,
+      description: "Roles API Lambda ARN",
+    });
+
+    new ssm.StringParameter(this, "SsmPlatformRolesApiFnArn", {
+      parameterName: `${ssmPrefix}/namespace/platform-roles-api-fn-arn`,
+      stringValue: platformRolesApiFn.functionArn,
+      description: "Platform Roles API Lambda ARN",
+    });
+
+    new ssm.StringParameter(this, "SsmGrantsApiFnArn", {
+      parameterName: `${ssmPrefix}/namespace/grants-api-fn-arn`,
+      stringValue: grantsApiFn.functionArn,
+      description: "Grants API Lambda ARN",
+    });
+
+    if (dataZone && loginRole) {
+      new cdk.CfnOutput(this, "DomainId", { value: dataZone.domain.attrId });
+      new cdk.CfnOutput(this, "DomainArn", { value: dataZone.domain.attrArn });
+      new cdk.CfnOutput(this, "LoginRoleArn", { value: loginRole.roleArn });
+    }
+  }
+
+  /**
+   * Provision the SMUS (DataZone) domain used as the table-metadata store:
+   * execution role, domain, project-access role, project profile, system
+   * project, form type and asset type. Skipped with the DynamoDB metadata
+   * store (`metadata_store=dynamodb`).
+   */
+  private createDataZoneDomain(ssmPrefix: string): DataZoneDomain {
     // ── Domain execution role ────────────────────────────────────
     // Trust policy per https://docs.aws.amazon.com/sagemaker-unified-studio/latest/adminguide/setup-iam-based-domains.html
     const smusPrincipals = [
@@ -349,8 +770,6 @@ export class NamespaceStack extends SCLStack {
     // delete-domain --skip-deletion-check directly instead, which does
     // support a full cascading force-delete at the domain level.
     domain.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
-
-    this.domainId = domain.attrId;
 
     // ── Shared project access role ─────────────────────────────────
     // A single IAM role registered as PROJECT_OWNER on every namespace's
@@ -633,292 +1052,18 @@ export class NamespaceStack extends SCLStack {
     assetTypeCr.node.addDependency(assetTypeCrMembership);
     assetTypeCr.node.addDependency(assetTypeCrOwner);
 
-    // ── Shared Lambda code bundle ─────────────────────────────────
-    const lambdaCode = bundlePython({
-      srcDirs: [
-        Paths.controlPlaneSrc,
-        Paths.commonLib,
-        Paths.smithyGeneratedControlPlanePythonServer,
-      ],
-      requirementsFile: fromRoot("packages/control-plane/requirements.txt"),
-    });
+    return { domain, executionRole, projectProfileId };
+  }
 
-    // ── Namespace API Lambda (combined create + list + delete-trigger) ──
-    // Defined before the deletion pipeline so its role ARN can be passed in
-    // (DeletePlatform assumes it for datazone:DeleteProject — see below and
-    // cleanup.delete_smu_project). DELETION_STATE_MACHINE_ARN is a Lazy
-    // token since the pipeline is constructed after this Lambda but this
-    // Lambda's environment needs the pipeline's ARN; CDK resolves Lazy
-    // values at synth time once every construct has been created, so the
-    // circular-looking reference is safe.
-    const namespaceApiFn: lambda.Function = new lambda.Function(
-      this,
-      "NamespaceApiFn",
-      {
-        functionName: this.prefixed("namespace-api"),
-        runtime: lambda.Runtime.PYTHON_3_12,
-        handler: "coa_control_plane.namespace.namespace_api_handler.handler",
-        code: lambdaCode,
-        timeout: cdk.Duration.seconds(15),
-        memorySize: 256,
-        vpc: props.vpc,
-        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        securityGroups: [props.lambdaSecurityGroup],
-        environment: {
-          NAMESPACES_TABLE: namespaces.table.tableName,
-          ROLES_TABLE: props.rolesTable.tableName,
-          RESOURCE_ROLE_MAPPINGS_TABLE:
-            props.resourceRoleMappingsTable.tableName,
-          SOURCES_TABLE: this.prefixed(TABLE_NAMES.SOURCES),
-          METRIC_IMPORT_JOBS_TABLE: this.prefixed(
-            TABLE_NAMES.METRIC_IMPORT_JOBS,
-          ),
-          DATAZONE_DOMAIN_ID: domain.attrId,
-          DATAZONE_PROJECT_PROFILE_ID: projectProfileId,
-          ALLOWED_ORIGIN: allowedOrigin,
-          PROJECT_ACCESS_ROLE_ARN_SSM: `${ssmPrefix}/smus/dz-project-access-role-arn`,
-          ATHENA_RESULTS_BUCKET_SSM: `${ssmPrefix}/query/athena-results-bucket`,
-          RESOURCE_PREFIX: this.prefixed(""),
-          TAG_PREFIX: resolveContext(this.node).prefix,
-          DELETION_STATE_MACHINE_ARN: cdk.Lazy.string({
-            produce: (): string =>
-              deletionPipeline.stateMachine.stateMachineArn,
-          }),
-          ...(props.ontologyEngineEndpoint && {
-            ONTOLOGY_ENGINE_ENDPOINT: props.ontologyEngineEndpoint,
-          }),
-          // Lets get_handler resolve VKG service health from ECS
-          // (resolve_vkg_health). Absent this var the resolver short-circuits
-          // to UNKNOWN for every namespace.
-          ...(props.vkgClusterArn && {
-            VKG_CLUSTER_ARN: props.vkgClusterArn,
-          }),
-        },
-      },
-    );
-
-    namespaces.table.grantReadWriteData(namespaceApiFn);
-    props.rolesTable.grantReadWriteData(namespaceApiFn);
-    props.resourceRoleMappingsTable.grantReadWriteData(namespaceApiFn);
-
-    // Precondition checks for delete: read-only queries to detect active
-    // operations that could race with the deletion pipeline's cleanup.
-    // - SOURCES_TABLE ByNamespace GSI: sources actively scanning/enriching.
-    // - METRIC_IMPORT_JOBS_TABLE: IN_PROGRESS import jobs (#215 — completed/
-    //   failed jobs no longer block deletion).
-    // Ontology induction jobs are checked via an HTTP call to the
-    // ontology-engine (see delete_handler._check_active_induction_jobs) —
-    // no DynamoDB grant needed for that check.
-    namespaceApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["dynamodb:Query"],
-        resources: [
-          `arn:aws:dynamodb:${this.region}:${this.account}:table/${this.prefixed(TABLE_NAMES.SOURCES)}/index/ByNamespace`,
-          `arn:aws:dynamodb:${this.region}:${this.account}:table/${this.prefixed(TABLE_NAMES.METRIC_IMPORT_JOBS)}`,
-        ],
-      }),
-    );
-
-    namespaceApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["dynamodb:TransactWriteItems"],
-        resources: [
-          namespaces.table.tableArn,
-          props.rolesTable.tableArn,
-          props.resourceRoleMappingsTable.tableArn,
-        ],
-      }),
-    );
-    namespaceApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "datazone:CreateProject",
-          "datazone:CreateProjectMembership",
-          "datazone:DeleteProject",
-        ],
-        resources: ["*"], // V2 domains require wildcard — project doesn't exist yet to scope to
-      }),
-    );
-    namespaceApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["iam:GetRole"],
-        resources: [`arn:aws:iam::${this.account}:role/${this.prefixed("*")}`],
-      }),
-    );
-    namespaceApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["ssm:GetParameter"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/smus/*`,
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/query/*`,
-        ],
-      }),
-    );
-
-    // Athena workgroup creation (deletion moved to the deletion pipeline's
-    // DeletePlatform step — see namespace-deletion-pipeline.ts).
-    namespaceApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "athena:CreateWorkGroup",
-          "athena:GetWorkGroup",
-          "athena:TagResource",
-        ],
-        resources: [
-          `arn:aws:athena:${this.region}:${this.account}:workgroup/${this.prefixed("*")}`,
-        ],
-      }),
-    );
-
-    // Read-time VKG health resolution (GetNamespace -> resolve_vkg_health)
-    // calls ecs:DescribeServices, then ecs:ListTasks + ecs:DescribeTasks to
-    // read the container's functional-probe healthStatus (a running task is not
-    // necessarily able to translate — #170). All scoped to the VKG cluster via
-    // the ecs:cluster condition, mirroring the deletion pipeline grant.
-    if (props.vkgClusterArn) {
-      namespaceApiFn.addToRolePolicy(
-        new iam.PolicyStatement({
-          actions: [
-            "ecs:DescribeServices",
-            "ecs:ListTasks",
-            "ecs:DescribeTasks",
-          ],
-          resources: ["*"],
-          conditions: { ArnLike: { "ecs:cluster": props.vkgClusterArn } },
-        }),
-      );
-    }
-
-    this.namespaceApiFn = namespaceApiFn;
-
-    // ── Namespace deletion Step Functions pipeline ──────────────────
-    // sources-api / metric-api function names are constructed by naming
-    // convention (this.prefixed(...)), not a CDK cross-stack reference,
-    // because SourcesStack/MetricServiceStack deploy *after* NamespaceStack
-    // (see bin/app.ts) — the same pattern OntologyStack already uses to
-    // invoke sources-api (see ontology-stack.ts).
-    // GraphRAG doc-KG index teardown needs the AOSS collection. Both params are
-    // written by the storage stack; the read requires an explicit
-    // addDependency() in bin/app.ts because CDK cannot infer ordering from
-    // valueForStringParameter.
-    const opensearchEndpoint = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/opensearch/endpoint`,
-    );
-    const opensearchCollectionName =
-      ssm.StringParameter.valueForStringParameter(
-        this,
-        `${ssmPrefix}/opensearch/collection-name`,
-      );
-
-    const deletionPipeline: NamespaceDeletionPipeline =
-      new NamespaceDeletionPipeline(this, "DeletionPipeline", {
-        prefixed: (name: string) => this.prefixed(name),
-        lambdaCode,
-        vpc: props.vpc,
-        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        securityGroups: [props.lambdaSecurityGroup],
-        namespacesTable: namespaces.table,
-        resourceRoleMappingsTable: props.resourceRoleMappingsTable,
-        rolesTable: props.rolesTable,
-        sourcesApiFnName: this.prefixed("sources-api"),
-        metricApiFnName: this.prefixed("metric-api"),
-        datazoneDomainId: domain.attrId,
-        // DeletePlatform assumes namespaceApiFn's own execution role for
-        // datazone:DeleteProject — DataZone records the CreateProject
-        // caller as the project's owner, and namespaceApiFn is the role
-        // that actually calls CreateProject (see service.py's
-        // NamespaceService.create -> SMUSClient.create_project). Assuming
-        // DzProjectAccessRole instead would require also granting it
-        // PROJECT_OWNER membership, which is a broader, separate change —
-        // this reuses the ownership DataZone already grants for free.
-        namespaceApiFnRoleArn: namespaceApiFn.role!.roleArn,
-        vkgClusterArn: props.vkgClusterArn,
-        cloudMapNamespaceId: props.cloudMapNamespaceId,
-        ontologyBucketName: props.ontologyBucketName,
-        ontologyEngineEndpoint: props.ontologyEngineEndpoint,
-        // For dropping the namespace's GraphRAG doc-KG indexes on teardown.
-        // Read from SSM (the storage stack writes both) — see bin/app.ts for
-        // the explicit addDependency this read requires, since CDK cannot infer
-        // ordering from valueForStringParameter.
-        opensearchEndpoint,
-        opensearchCollectionName,
-        resourcePrefix: this.prefixed(""),
-      });
-
-    // Start the deletion pipeline's Step Functions execution.
-    deletionPipeline.stateMachine.grantStartExecution(namespaceApiFn);
-
-    // Allow DeletePlatform to assume this Lambda's own execution role.
-    // grantAssumeRole only adds an identity policy on the *grantee* — it
-    // does NOT modify the target role's trust policy.  We need both sides:
-    //  1. Identity policy on DeletePlatformFn (already in namespace-deletion-pipeline.ts)
-    //  2. Trust policy on namespaceApiFn's role (added here)
-    (namespaceApiFn.role! as iam.Role).assumeRolePolicy!.addStatements(
-      new iam.PolicyStatement({
-        actions: ["sts:AssumeRole"],
-        principals: [
-          new iam.ArnPrincipal(deletionPipeline.deletePlatformFn.role!.roleArn),
-        ],
-      }),
-    );
-
-    // ── Roles API Lambda (list platform roles + list/get namespace roles) ──
-    const rolesApiFn = new lambda.Function(this, "RolesApiFn", {
-      functionName: this.prefixed("roles-api"),
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: "coa_control_plane.roles.namespace_roles_handler.handler",
-      code: lambdaCode,
-      timeout: cdk.Duration.seconds(10),
-      memorySize: 256,
-      vpc: props.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      environment: {
-        ROLES_TABLE: props.rolesTable.tableName,
-        ALLOWED_ORIGIN: allowedOrigin,
-      },
-    });
-    props.rolesTable.grantReadData(rolesApiFn);
-
-    const platformRolesApiFn = new lambda.Function(this, "PlatformRolesApiFn", {
-      functionName: this.prefixed("platform-roles-api"),
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: "coa_control_plane.roles.list_platform_roles_handler.handler",
-      code: lambdaCode,
-      timeout: cdk.Duration.seconds(5),
-      memorySize: 256,
-      vpc: props.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      environment: {
-        ROLES_TABLE: props.rolesTable.tableName,
-        ALLOWED_ORIGIN: allowedOrigin,
-      },
-    });
-    props.rolesTable.grantReadData(platformRolesApiFn);
-
-    this.rolesApiFn = rolesApiFn;
-    this.platformRolesApiFn = platformRolesApiFn;
-
-    // ── Grants API Lambda (CRUD for grants) ──────────────────────────
-    const grantsApiFn = new lambda.Function(this, "GrantsApiFn", {
-      functionName: this.prefixed("grants-api"),
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: "coa_control_plane.grants.grants_handler.handler",
-      code: lambdaCode,
-      timeout: cdk.Duration.seconds(10),
-      memorySize: 256,
-      vpc: props.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      environment: {
-        ROLES_TABLE: props.rolesTable.tableName,
-        RESOURCE_ROLE_MAPPINGS_TABLE: props.resourceRoleMappingsTable.tableName,
-        ALLOWED_ORIGIN: allowedOrigin,
-      },
-    });
-    props.rolesTable.grantReadData(grantsApiFn);
-    props.resourceRoleMappingsTable.grantReadWriteData(grantsApiFn);
-
-    this.grantsApiFn = grantsApiFn;
+  /**
+   * Register namespaceApiFn's role as a domain user and owner, and create the
+   * admin login role for the SMUS console. Returns the login role.
+   */
+  private registerDataZoneUsers(
+    dataZone: DataZoneDomain,
+    namespaceApiFn: lambda.Function,
+  ): iam.Role {
+    const { domain, executionRole } = dataZone;
 
     // ── Register Lambda role as a domain user profile ──────────
     const lambdaUserProfile = new datazone.CfnUserProfile(
@@ -1025,51 +1170,6 @@ export class NamespaceStack extends SCLStack {
       );
     }
 
-    // ── Publish domain ID to SSM ─────────────────────────────────
-    new ssm.StringParameter(this, "SsmDomainId", {
-      parameterName: `${ssmPrefix}/smus/domain-id`,
-      stringValue: domain.attrId,
-      description: "SageMaker Unified Studio domain ID",
-    });
-
-    new ssm.StringParameter(this, "SsmNamespacesTableName", {
-      parameterName: `${ssmPrefix}/namespace/namespaces-table-name`,
-      stringValue: this.namespacesTable.tableName,
-      description: "Namespaces DynamoDB table name",
-    });
-
-    new ssm.StringParameter(this, "SsmLoginRoleArn", {
-      parameterName: `${ssmPrefix}/smus/login-role-arn`,
-      stringValue: loginRole.roleArn,
-      description: "SMUS admin login role ARN",
-    });
-
-    new ssm.StringParameter(this, "SsmNamespaceApiFnArn", {
-      parameterName: `${ssmPrefix}/namespace/api-fn-arn`,
-      stringValue: namespaceApiFn.functionArn,
-      description: "Namespace API Lambda ARN",
-    });
-
-    new ssm.StringParameter(this, "SsmRolesApiFnArn", {
-      parameterName: `${ssmPrefix}/namespace/roles-api-fn-arn`,
-      stringValue: rolesApiFn.functionArn,
-      description: "Roles API Lambda ARN",
-    });
-
-    new ssm.StringParameter(this, "SsmPlatformRolesApiFnArn", {
-      parameterName: `${ssmPrefix}/namespace/platform-roles-api-fn-arn`,
-      stringValue: platformRolesApiFn.functionArn,
-      description: "Platform Roles API Lambda ARN",
-    });
-
-    new ssm.StringParameter(this, "SsmGrantsApiFnArn", {
-      parameterName: `${ssmPrefix}/namespace/grants-api-fn-arn`,
-      stringValue: grantsApiFn.functionArn,
-      description: "Grants API Lambda ARN",
-    });
-
-    new cdk.CfnOutput(this, "DomainId", { value: domain.attrId });
-    new cdk.CfnOutput(this, "DomainArn", { value: domain.attrArn });
-    new cdk.CfnOutput(this, "LoginRoleArn", { value: loginRole.roleArn });
+    return loginRole;
   }
 }

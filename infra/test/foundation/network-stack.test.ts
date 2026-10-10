@@ -419,3 +419,45 @@ describe("NetworkStack", () => {
     });
   });
 });
+
+// DynamoDB metadata store (metadata_store=dynamodb): nothing calls DataZone, so
+// the DataZone interface endpoint is not created. Every other endpoint stays.
+describe("NetworkStack in DynamoDB mode (metadata_store=dynamodb)", () => {
+  const endpointServiceNames = (template: Template): string[] =>
+    Object.values(template.findResources("AWS::EC2::VPCEndpoint")).map(
+      (e: any) => JSON.stringify(e.Properties.ServiceName),
+    );
+
+  it("DynamoDB mode: creates no DataZone interface endpoint", () => {
+    const template = buildStack({ metadata_store: "dynamodb" });
+    expect(
+      endpointServiceNames(template).some((s) => s.includes(".datazone")),
+    ).toBe(false);
+  });
+
+  it("DynamoDB mode: still creates every other endpoint", () => {
+    const serviceNames = endpointServiceNames(
+      buildStack({ metadata_store: "dynamodb" }),
+    );
+    for (const fragment of [
+      "s3",
+      "dynamodb",
+      "bedrock-runtime",
+      "logs",
+      "ecr.api",
+      "ecr.dkr",
+      ".sts",
+      ".events",
+      ".sqs",
+      ".states",
+      ".athena",
+      ".glue",
+      ".lambda",
+      ".ecs",
+      "neptune-graph",
+      ".aoss",
+    ]) {
+      expect(serviceNames.some((s) => s.includes(fragment))).toBe(true);
+    }
+  });
+});

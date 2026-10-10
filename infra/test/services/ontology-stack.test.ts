@@ -530,3 +530,85 @@ describe("ontology-engine Dockerfile CVE hygiene", () => {
     expect(dockerfile).toMatch(/pip install[^\n]*--upgrade pip/);
   });
 });
+
+// DynamoDB metadata store (metadata_store=dynamodb). The ontology engine reads
+// approved table metadata (induction) from the metadata-assets table instead of
+// DataZone, so it needs the table and DynamoDB read access, no DataZone domain,
+// and synth must no longer require smusDomainId.
+describe("OntologyStack in DynamoDB mode (metadata_store=dynamodb)", () => {
+  const DDB_CONTEXT = { ...TEST_CONTEXT, metadata_store: "dynamodb" };
+
+  /** Render an OntologyStack in DynamoDB mode with the given smusDomainId. */
+  function renderDdb(smusDomainId: string, id: string): Template {
+    const app = new cdk.App({ context: DDB_CONTEXT });
+    const network = new NetworkStack(app, `${id}Network`);
+    return Template.fromStack(
+      new OntologyStack(app, id, {
+        network,
+        serviceNamespace: network.serviceNamespace,
+        neptuneClusterArn:
+          "arn:aws:neptune-db:us-east-1:123456789012:cluster-abc123/*",
+        neptuneClusterEndpoint:
+          "test-neptune.cluster-abc.us-east-1.neptune.amazonaws.com",
+        ontologyArtifactsBucket: cdk.aws_s3.Bucket.fromBucketName(
+          network,
+          `${id}ArtifactsBucket`,
+          "coa-dev-ontology-artifacts-123456789012",
+        ),
+        smusDomainId,
+        allowedOrigin: "https://test.example.com",
+      }),
+    );
+  }
+
+  // A domain id is still passed here so this suite can build the stack before
+  // the infra change; the no-domain case is covered by its own test below.
+  let template: Template;
+  beforeAll(() => {
+    template = renderDdb("dzd-test123", "DdbOntology");
+  });
+
+  const actionsOf = (s: any): string[] =>
+    Array.isArray(s.Action) ? s.Action : [s.Action];
+  const allStatements = (t: Template): any[] =>
+    Object.values(t.findResources("AWS::IAM::Policy")).flatMap(
+      (p: any) => p.Properties.PolicyDocument.Statement,
+    );
+
+  test("DynamoDB mode: synth succeeds without a DataZone domain id", () => {
+    expect(() => renderDdb("", "DdbOntologyNoDomain")).not.toThrow();
+  });
+
+  test("DynamoDB mode: container selects the DynamoDB backend and has no SMUS_DOMAIN_ID", () => {
+    expect(envValue(template, "METADATA_STORE_BACKEND")).toBe("dynamodb");
+    expect(envValue(template, "METADATA_STORE_TABLE")).toBeDefined();
+    expect(envValue(template, "SMUS_DOMAIN_ID")).toBeUndefined();
+  });
+
+  test("DynamoDB mode: task role reads the asset table and has no datazone:* actions", () => {
+    const statements = allStatements(template);
+    const assetTableReads = statements.filter(
+      (s) =>
+        actionsOf(s).some((a) => a.startsWith("dynamodb:")) &&
+        JSON.stringify(s.Resource).includes("metadata-assets"),
+    );
+    expect(assetTableReads.length).toBeGreaterThan(0);
+    const dataZoneActions = statements
+      .flatMap(actionsOf)
+      .filter((a: string) => a.startsWith("datazone:"));
+    expect(dataZoneActions).toEqual([]);
+  });
+
+  test("DynamoDB mode: task role still has Neptune access", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(["neptune-db:ReadDataViaQuery"]),
+            Effect: "Allow",
+          }),
+        ]),
+      }),
+    });
+  });
+});

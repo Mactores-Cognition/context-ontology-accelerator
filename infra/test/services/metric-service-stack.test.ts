@@ -662,3 +662,124 @@ describe("MetricServiceStack", () => {
     expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// ── DataZone / metadata-store wiring ────────────────────────────────────────
+//
+// The metric API Lambda (metric validation) and the import worker (dataset
+// resolution) read table metadata. In the default mode they reach DataZone via
+// SMUS_DOMAIN_ID + PROJECT_ACCESS_ROLE_ARN and sts:AssumeRole on the
+// project-access role. In DynamoDB mode (metadata_store=dynamodb) they read the
+// metadata-assets table instead.
+
+/** Synthesise the metric-service stack with extra context. */
+function synthMetricService(
+  extra: Record<string, unknown>,
+  id: string,
+): Template {
+  const app = new cdk.App({ context: { ...TEST_CONTEXT, ...extra } });
+  const network = new NetworkStack(app, `${id}Network`, { env: TEST_ENV });
+  return Template.fromStack(
+    new MetricServiceStack(app, `${id}MetricService`, {
+      vpc: network.vpc,
+      lambdaSecurityGroup: network.lambdaSecurityGroup,
+      aossSecurityGroup: network.aossSecurityGroup,
+      neptuneEndpoint:
+        "test-neptune.cluster-abc.us-east-1.neptune.amazonaws.com",
+      neptuneClusterArn:
+        "arn:aws:neptune-db:us-east-1:123456789012:cluster-abc123/*",
+      env: TEST_ENV,
+    }),
+  );
+}
+
+/** The Lambda whose FunctionName ends with `-${suffix}`. */
+function metricLambda(t: Template, suffix: string): any {
+  const fn = Object.values(t.findResources("AWS::Lambda::Function")).find(
+    (f: any) => String(f.Properties?.FunctionName ?? "").endsWith(`-${suffix}`),
+  );
+  expect(fn).toBeDefined();
+  return fn;
+}
+
+/** IAM statements attached to the role of the Lambda ending `-${suffix}`. */
+function metricLambdaStatements(t: Template, suffix: string): any[] {
+  const roleId = metricLambda(t, suffix).Properties.Role["Fn::GetAtt"][0];
+  return Object.values(t.findResources("AWS::IAM::Policy"))
+    .filter((p: any) => p.Properties.Roles?.some((r: any) => r.Ref === roleId))
+    .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+}
+
+/** True when a statement assumes the DataZone project-access role. */
+function assumesProjectAccessRole(s: any): boolean {
+  const actions: string[] = Array.isArray(s.Action) ? s.Action : [s.Action];
+  return (
+    actions.includes("sts:AssumeRole") &&
+    JSON.stringify(s.Resource).toLowerCase().includes("dzprojectaccessrolearn")
+  );
+}
+
+describe("MetricServiceStack in DynamoDB mode (metadata_store=dynamodb)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = synthMetricService({ metadata_store: "dynamodb" }, "Ddb");
+  });
+
+  test("DynamoDB mode: metric API Lambda selects the DynamoDB backend and has no SMUS_DOMAIN_ID", () => {
+    const vars = metricLambda(template, "metric-api").Properties.Environment
+      .Variables;
+    expect(vars).toMatchObject({
+      METADATA_STORE_BACKEND: "dynamodb",
+      METADATA_STORE_TABLE: expect.anything(),
+    });
+    expect(vars).not.toHaveProperty("SMUS_DOMAIN_ID");
+  });
+
+  test("DynamoDB mode: import worker selects the DynamoDB backend and has no SMUS_DOMAIN_ID", () => {
+    const vars = metricLambda(template, "metric-import-worker").Properties
+      .Environment.Variables;
+    expect(vars).toMatchObject({
+      METADATA_STORE_BACKEND: "dynamodb",
+      METADATA_STORE_TABLE: expect.anything(),
+    });
+    expect(vars).not.toHaveProperty("SMUS_DOMAIN_ID");
+  });
+
+  test("DynamoDB mode: neither Lambda assumes the DataZone project-access role", () => {
+    for (const suffix of ["metric-api", "metric-import-worker"]) {
+      expect(
+        metricLambdaStatements(template, suffix).some(assumesProjectAccessRole),
+      ).toBe(false);
+    }
+  });
+
+  test("DynamoDB mode: still creates exactly 4 Lambda functions", () => {
+    template.resourceCountIs("AWS::Lambda::Function", 4);
+  });
+});
+
+// Default mode: closes a coverage gap. The suite above pins the import
+// worker's SMUS env vars but not the metric API Lambda's, nor either Lambda's
+// sts:AssumeRole on the project-access role.
+describe("MetricServiceStack DataZone wiring (default mode)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = synthMetricService({}, "Dz");
+  });
+
+  test("default mode: metric API Lambda carries SMUS_DOMAIN_ID and PROJECT_ACCESS_ROLE_ARN", () => {
+    const vars = metricLambda(template, "metric-api").Properties.Environment
+      .Variables;
+    expect(vars).toHaveProperty("SMUS_DOMAIN_ID");
+    expect(vars).toHaveProperty("PROJECT_ACCESS_ROLE_ARN");
+  });
+
+  test("default mode: metric API Lambda and import worker can assume the project-access role", () => {
+    for (const suffix of ["metric-api", "metric-import-worker"]) {
+      expect(
+        metricLambdaStatements(template, suffix).some(assumesProjectAccessRole),
+      ).toBe(true);
+    }
+  });
+});

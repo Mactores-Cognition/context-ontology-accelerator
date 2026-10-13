@@ -11,6 +11,7 @@ role to register, and project deletion removes the namespace's table items.
 
 from __future__ import annotations
 
+import os
 import socket
 from unittest.mock import MagicMock, patch
 
@@ -58,6 +59,9 @@ def dynamodb_mode(monkeypatch):
         "AWS_ACCESS_KEY_ID": "testing",
         "AWS_SECRET_ACCESS_KEY": "testing",
         "AWS_SESSION_TOKEN": "testing",
+        "AWS_CONFIG_FILE": os.devnull,
+        "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
+        "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_DEFAULT_REGION": _REGION,
         "AWS_REGION": _REGION,
         "NAMESPACES_TABLE": "test-namespaces",

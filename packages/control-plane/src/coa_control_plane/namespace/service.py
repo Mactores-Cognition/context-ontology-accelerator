@@ -16,7 +16,7 @@ from botocore.exceptions import ClientError
 from coa_common import sanitize_principal_key
 from coa_common.authnz_types import PrincipalType, ResourceType
 from coa_common.dao import DynamoDBDAO, QueryParams
-from coa_common.metadata_store import MetadataStoreClient, MetadataStoreError
+from coa_common.metadata_store import MetadataStoreClient, MetadataStoreError, is_dynamodb_backend
 from coa_control_plane_server.models.create_namespace_request_content import CreateNamespaceRequestContent
 from coa_control_plane_server.models.namespace_detail import NamespaceDetail
 from coa_control_plane_server.models.namespace_status import NamespaceStatus
@@ -103,16 +103,18 @@ class NamespaceService:
         # not just IAM permission. A membership failure must therefore
         # fail namespace creation loudly and roll back the half-created project
         # rather than leave a permanently scan-broken namespace behind.
-        try:
-            self._add_service_role_memberships(project.project_id)
-        except MetadataStoreError:
-            logger.error(
-                "service_role_membership_failed",
-                project_id=project.project_id,
-                namespace_id=namespace_id,
-            )
-            self._rollback_project(project.project_id, request.name)
-            raise
+        # DataZone only: the DynamoDB store has no project members (access is IAM).
+        if not is_dynamodb_backend():
+            try:
+                self._add_service_role_memberships(project.project_id)
+            except MetadataStoreError:
+                logger.error(
+                    "service_role_membership_failed",
+                    project_id=project.project_id,
+                    namespace_id=namespace_id,
+                )
+                self._rollback_project(project.project_id, request.name)
+                raise
 
         # Step 2c: Create Athena workgroup for query isolation.
         # `_create_athena_workgroup` returns None if the workgroup could not

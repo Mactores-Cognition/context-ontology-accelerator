@@ -91,10 +91,12 @@ from coa_common.guardrail_screener import (
 from coa_common.logging import setup_logging
 from coa_common.metadata_store import (
     AssetResult,
+    DynamoDBMetadataStore,
     MetadataStoreClient,
     MetadataStoreError,
     ProjectResult,
     SMUSClient,
+    get_metadata_store,
 )
 from coa_common.namespace_resolver import resolve_namespace_id
 from coa_common.principal_keys import build_principal_keys, sanitize_principal_key
@@ -145,6 +147,7 @@ __all__ = [
     "DEFAULT_USE_BATCH_INFERENCE",
     "DiscoveredMetadata",
     "DynamoDBDAO",
+    "DynamoDBMetadataStore",
     "EnrichmentSource",
     "EXTRACTION_BATCH_SIZE",
     "EXTRACTION_DEFAULTS",
@@ -189,6 +192,7 @@ __all__ = [
     "to_graphrag_tenant_id",
     "read_file_bytes",
     "get_caller_identity",
+    "get_metadata_store",
     "iso_to_epoch",
     "get_s3_client",
     "list_objects",

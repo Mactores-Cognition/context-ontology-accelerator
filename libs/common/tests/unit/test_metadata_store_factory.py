@@ -10,6 +10,7 @@ builds a DynamoDBMetadataStore on ``METADATA_STORE_TABLE``.
 
 from __future__ import annotations
 
+import os
 import socket
 from unittest.mock import patch
 
@@ -49,6 +50,18 @@ _FACTORY = "coa_common.metadata_store.factory"
 def clean_env(monkeypatch):
     monkeypatch.delenv("METADATA_STORE_BACKEND", raising=False)
     monkeypatch.delenv("METADATA_STORE_TABLE", raising=False)
+    # Building a boto3 client resolves credentials: keep them fake and never read ~/.aws or instance metadata.
+    for var, value in {
+        "AWS_ACCESS_KEY_ID": "testing",
+        "AWS_SECRET_ACCESS_KEY": "testing",
+        "AWS_SESSION_TOKEN": "testing",
+        "AWS_DEFAULT_REGION": "us-east-1",
+        "AWS_CONFIG_FILE": os.devnull,
+        "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }.items():
+        monkeypatch.setenv(var, value)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
 
 
 def _dynamodb_env(monkeypatch, table: str = "coa-dev-metadata-assets") -> None:
@@ -57,18 +70,24 @@ def _dynamodb_env(monkeypatch, table: str = "coa-dev-metadata-assets") -> None:
 
 
 class TestGetMetadataStore:
+    # SMUSClient is patched in these tests: building a real one makes botocore rewrite the module-level
+    # _DATAZONE_RETRY_CONFIG in place, which breaks test_smus_extra.py::TestDataZoneRetryConfig if it runs later.
     def test_default_backend_is_smus(self):
         from coa_common.metadata_store.factory import get_metadata_store
-        from coa_common.metadata_store.smus import SMUSClient
 
-        assert isinstance(get_metadata_store(domain_id="dzd-1", region_name="us-east-1"), SMUSClient)
+        with patch(f"{_FACTORY}.SMUSClient") as smus_cls:
+            client = get_metadata_store(domain_id="dzd-1", region_name="us-east-1")
+        smus_cls.assert_called_once()
+        assert client is smus_cls.return_value
 
     def test_explicit_smus_backend(self, monkeypatch):
         from coa_common.metadata_store.factory import get_metadata_store
-        from coa_common.metadata_store.smus import SMUSClient
 
         monkeypatch.setenv("METADATA_STORE_BACKEND", "smus")
-        assert isinstance(get_metadata_store(domain_id="dzd-1", region_name="us-east-1"), SMUSClient)
+        with patch(f"{_FACTORY}.SMUSClient") as smus_cls:
+            client = get_metadata_store(domain_id="dzd-1", region_name="us-east-1")
+        smus_cls.assert_called_once()
+        assert client is smus_cls.return_value
 
     def test_smus_receives_the_same_arguments_as_before(self):
         from coa_common.metadata_store.factory import get_metadata_store

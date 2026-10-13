@@ -208,7 +208,10 @@ class TestTableEnricherWriteBack:
 
 class TestBulkReviewWorker:
     def test_builds_the_dynamodb_store(self, dynamodb_mode):
-        from coa_common.metadata_store.dynamodb import DynamoDBMetadataStore
         from coa_sources.database.bulk_review import worker
 
-        assert isinstance(worker._build_smus_client(), DynamoDBMetadataStore)
+        # Checked by name, not isinstance: test_sources_handler.py purges coa_common* from sys.modules,
+        # so the worker's factory and a fresh import can hold different copies of the class.
+        store = worker._build_smus_client()
+        assert type(store).__name__ == "DynamoDBMetadataStore"
+        assert store.table_name == _TABLE

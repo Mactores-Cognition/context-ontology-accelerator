@@ -111,9 +111,10 @@ def _put_asset(tbl, project_id: str, name: str) -> None:
 
 class TestClientAndGuards:
     def test_get_smus_client_builds_the_dynamodb_store(self, dynamodb_mode):
-        from coa_common.metadata_store.dynamodb import DynamoDBMetadataStore
-
-        assert isinstance(_current(_DR, _dr)._get_smus_client(), DynamoDBMetadataStore)
+        # By name, not isinstance: test_sources_handler.py purges coa_common* from sys.modules.
+        store = _current(_DR, _dr)._get_smus_client()
+        assert type(store).__name__ == "DynamoDBMetadataStore"
+        assert store.table_name == _TABLE
 
     def test_smus_or_500_returns_a_client(self, dynamodb_mode):
         client, err = _current(_DR, _dr)._smus_or_500()

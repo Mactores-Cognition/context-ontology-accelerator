@@ -31,6 +31,8 @@ import { DynamoDBTable } from "../../constructs/dynamodb-table";
 import { LakeFormationAdmin } from "../../constructs/lakeformation-admin";
 import { SclMonitoring } from "../../constructs";
 import {
+  isDynamoDbMetadataStore,
+  METADATA_STORE_DYNAMODB,
   namespaceTagKey,
   resolveContext,
   resolveLambdaReservedConcurrency,
@@ -160,22 +162,53 @@ export class SourcesStack extends SCLStack {
       );
 
     // ── Resolve namespace resources via SSM ──────────────────────────
-    const domainId = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/domain-id`,
-    );
-    const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/dz-project-access-role-arn`,
-    );
+    // Table-metadata store. DataZone: the SMUS domain id and the shared
+    // project access role published by NamespaceStack. DynamoDB
+    // (metadata_store=dynamodb): NamespaceStack's metadata-assets table.
+    // metadataStoreEnv / grantMetadataStore apply whichever is in use to
+    // every function that reads or writes table metadata.
+    let domainId: string | undefined;
+    let metadataStoreEnv: Record<string, string>;
+    let grantMetadataStore: (grantee: iam.IPrincipal) => void;
+    if (isDynamoDbMetadataStore(this.node)) {
+      const metadataAssetsTable = dynamodb.Table.fromTableAttributes(
+        this,
+        "MetadataAssetsTable",
+        {
+          tableName: this.prefixed(TABLE_NAMES.METADATA_ASSETS),
+          globalIndexes: ["AssetById"],
+        },
+      );
+      metadataStoreEnv = {
+        METADATA_STORE_BACKEND: METADATA_STORE_DYNAMODB,
+        METADATA_STORE_TABLE: metadataAssetsTable.tableName,
+      };
+      grantMetadataStore = (grantee) =>
+        metadataAssetsTable.grantReadWriteData(grantee);
+    } else {
+      domainId = ssm.StringParameter.valueForStringParameter(
+        this,
+        `${ssmPrefix}/smus/domain-id`,
+      );
+      const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
+        this,
+        `${ssmPrefix}/smus/dz-project-access-role-arn`,
+      );
+      metadataStoreEnv = {
+        SMUS_DOMAIN_ID: domainId,
+        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+      };
+      const projectAccessRole = iam.Role.fromRoleArn(
+        this,
+        "ProjectAccessRole",
+        projectAccessRoleArn,
+      );
+      grantMetadataStore = (grantee) =>
+        projectAccessRole.grantAssumeRole(grantee);
+    }
     const namespacesTableName = ssm.StringParameter.valueForStringParameter(
       this,
       `${ssmPrefix}/namespace/namespaces-table-name`,
-    );
-    const projectAccessRole = iam.Role.fromRoleArn(
-      this,
-      "ProjectAccessRole",
-      projectAccessRoleArn,
     );
     const namespacesTable = dynamodb.Table.fromTableName(
       this,
@@ -641,8 +674,7 @@ export class SourcesStack extends SCLStack {
         SOURCES_TABLE: this.sourcesTable.tableName,
         SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: domainId,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv,
         // BARE prefix — keys the namespace tag this handler re-verifies against the
         // STORED row: the credential secret before the connector reads it, and the
         // Glue database's ownership before it reads the catalog or samples rows.
@@ -694,7 +726,7 @@ export class SourcesStack extends SCLStack {
     // maintained exclusively by the sources API Lambda, which is granted
     // read-write separately.
     namespacesTable.grantReadData(dbConnectorFn);
-    projectAccessRole.grantAssumeRole(dbConnectorFn.role!);
+    grantMetadataStore(dbConnectorFn.role!);
 
     // Glue catalog access: same-account, deployment region only.
     // Glue resources are region-scoped; cross-region access is not required
@@ -1304,8 +1336,7 @@ export class SourcesStack extends SCLStack {
         SOURCES_TABLE: this.sourcesTable.tableName,
         SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: domainId,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv,
         // ECS does not inject a region into task containers, so without this
         // resolve_region() falls back to us-east-1 and every Bedrock call —
         // including ApplyGuardrail — targets the wrong region. In a non-us-east-1
@@ -1332,7 +1363,7 @@ export class SourcesStack extends SCLStack {
     this.sourcesTable.grantReadWriteData(dbEnrichmentTaskDef.taskRole);
     this.sourceScanJobsTable.grantReadWriteData(dbEnrichmentTaskDef.taskRole);
     namespacesTable.grantReadData(dbEnrichmentTaskDef.taskRole);
-    projectAccessRole.grantAssumeRole(dbEnrichmentTaskDef.taskRole);
+    grantMetadataStore(dbEnrichmentTaskDef.taskRole);
 
     dbEnrichmentTaskDef.taskRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
@@ -1813,8 +1844,7 @@ export class SourcesStack extends SCLStack {
         // each terminal approve/reject so the console shows real history.
         SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
         NAMESPACES_TABLE: namespacesTableName,
-        SMUS_DOMAIN_ID: domainId,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv,
         // Parallel revision writes per worker invocation. Tunable per env.
         BULK_REVIEW_PARALLELISM: "10",
         // Self-continuation: a source larger than one invocation can process
@@ -1850,7 +1880,7 @@ export class SourcesStack extends SCLStack {
     // approve/reject so the console's Scan History tab shows real events.
     this.sourceScanJobsTable.grantReadWriteData(bulkReviewWorkerFn);
     namespacesTable.grantReadData(bulkReviewWorkerFn);
-    projectAccessRole.grantAssumeRole(bulkReviewWorkerFn.role!);
+    grantMetadataStore(bulkReviewWorkerFn.role!);
     // Self-continuation: the worker re-enqueues to its own queue to page a
     // large source across invocations (#853).
     bulkReviewQueue.grantSendMessages(bulkReviewWorkerFn);
@@ -1915,8 +1945,7 @@ export class SourcesStack extends SCLStack {
           SOURCES_TABLE: this.sourcesTable.tableName,
           NAMESPACES_TABLE: namespacesTableName,
           SOURCE_SCAN_JOBS_TABLE: this.sourceScanJobsTable.tableName,
-          SMUS_DOMAIN_ID: domainId,
-          PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+          ...metadataStoreEnv,
           // The DataZone cleanup budget defaults to 240s (tuned for the 30s
           // sources-api). Without raising it here the worker would cap cleanup at
           // 240s despite its 15-min timeout — leaving a large source's assets
@@ -1950,7 +1979,7 @@ export class SourcesStack extends SCLStack {
     this.sourcesTable.grantReadWriteData(sourceDeleteWorkerFn);
     namespacesTable.grantReadData(sourceDeleteWorkerFn);
     this.sourceScanJobsTable.grantReadWriteData(sourceDeleteWorkerFn);
-    projectAccessRole.grantAssumeRole(sourceDeleteWorkerFn.role!);
+    grantMetadataStore(sourceDeleteWorkerFn.role!);
 
     // ================================================================
     // Documents Pipeline — Preprocessing Lambda + KgBuild ECS + SFN
@@ -2902,8 +2931,7 @@ export class SourcesStack extends SCLStack {
         BUCKET_NAME: sourcesBucket.bucketName,
         DELETION_STATE_MACHINE_ARN: docDeletionStateMachine.stateMachineArn,
         ALLOWED_ORIGIN: allowedOrigin,
-        SMUS_DOMAIN_ID: domainId,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...metadataStoreEnv,
         FEDERATION_PROVISIONER_ROLE_ARN: federationProvisionerFn.role!.roleArn,
         // Feeds `_build_catalog_name`, which derives the per-source Athena
         // data-catalog name registered at source create. Without it the handler
@@ -2973,22 +3001,25 @@ export class SourcesStack extends SCLStack {
     bulkReviewQueue.grantSendMessages(sourcesApiFn);
     sourceDeleteQueue.grantSendMessages(sourcesApiFn);
     docDeletionStateMachine.grantStartExecution(sourcesApiFn);
-    projectAccessRole.grantAssumeRole(sourcesApiFn.role!);
+    grantMetadataStore(sourcesApiFn.role!);
 
     // DataZone Search/Get/Delete for tables tab and source deletion
-    sourcesApiFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "datazone:Search",
-          "datazone:GetAsset",
-          "datazone:DeleteAsset",
-        ],
-        resources: [
-          `arn:aws:datazone:${this.region}:${this.account}:domain/${domainId}`,
-          `arn:aws:datazone:${this.region}:${this.account}:domain/${domainId}/*`,
-        ],
-      }),
-    );
+    // (DataZone metadata store only).
+    if (domainId) {
+      sourcesApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "datazone:Search",
+            "datazone:GetAsset",
+            "datazone:DeleteAsset",
+          ],
+          resources: [
+            `arn:aws:datazone:${this.region}:${this.account}:domain/${domainId}`,
+            `arn:aws:datazone:${this.region}:${this.account}:domain/${domainId}/*`,
+          ],
+        }),
+      );
+    }
 
     // Federation teardown on delete-source runs under the federation
     // provisioner's Lake Formation admin role, which sources-api assumes (see

@@ -338,3 +338,121 @@ describe("NamespaceDeletionPipeline GraphRAG index teardown", () => {
     );
   });
 });
+
+// DynamoDB metadata store (metadata_store=dynamodb). DeletePlatform removes the
+// namespace's items from the metadata-assets table instead of deleting a
+// DataZone project, so it needs the table and DynamoDB permissions, and no
+// longer assumes namespaceApiFn's role (that existed only for DataZone's
+// project-ownership check). Built with the same props as the default-mode
+// suite above, so the DataZone props are present but must be ignored.
+describe("NamespaceDeletionPipeline in DynamoDB mode (metadata_store=dynamodb)", () => {
+  const ASSET_TABLE = "coa-dev-metadata-assets";
+  const NAMESPACE_API_ROLE =
+    "arn:aws:iam::123456789012:role/coa-dev-namespace-api";
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App({ context: { metadata_store: "dynamodb" } });
+    const stack = new cdk.Stack(app, "DdbTestStack");
+    const vpc = new ec2.Vpc(stack, "Vpc");
+    const table = (id: string, sortKey = false) =>
+      new dynamodb.Table(stack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+        ...(sortKey && {
+          sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
+        }),
+      });
+
+    new NamespaceDeletionPipeline(stack, "DeletionPipeline", {
+      prefixed: (name: string) => `coa-dev-${name}`,
+      lambdaCode: lambda.Code.fromInline("def handler(event, context): pass"),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      namespacesTable: table("Namespaces", true),
+      resourceRoleMappingsTable: table("RRM"),
+      rolesTable: table("Roles"),
+      sourcesApiFnName: "coa-dev-sources-api",
+      metricApiFnName: "coa-dev-metric-api",
+      datazoneDomainId: "dzd-123",
+      namespaceApiFnRoleArn: NAMESPACE_API_ROLE,
+      vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/vkg",
+      cloudMapNamespaceId: "ns-abc123",
+      ontologyBucketName: "coa-dev-ontology-artifacts",
+      opensearchEndpoint: "https://abc.us-east-1.aoss.amazonaws.com",
+      opensearchCollectionName: "coa-dev-vector-store",
+      resourcePrefix: "coa-dev-",
+    });
+    template = Template.fromStack(stack);
+  });
+
+  /** The DeletePlatform Lambda resource. */
+  function deletePlatformFn(): any {
+    const fn = Object.values(
+      template.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: "coa-dev-ns-deletion-platform" },
+      }),
+    )[0];
+    expect(fn).toBeDefined();
+    return fn;
+  }
+
+  /** IAM statements in the DeletePlatform Lambda's policies. */
+  function deletePlatformStatements(): any[] {
+    return Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((p: any) =>
+        (p.Properties?.PolicyName as string)?.includes("DeletePlatformFn"),
+      )
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+  }
+
+  const actionsOf = (s: any): string[] =>
+    Array.isArray(s.Action) ? s.Action : [s.Action];
+
+  test("DynamoDB mode: DeletePlatformFn gets the asset table env and DynamoDB delete permissions", () => {
+    expect(deletePlatformFn().Properties.Environment.Variables).toMatchObject({
+      METADATA_STORE_BACKEND: "dynamodb",
+      METADATA_STORE_TABLE: ASSET_TABLE,
+    });
+    const assetTableDeletes = deletePlatformStatements().filter(
+      (s) =>
+        actionsOf(s).includes("dynamodb:DeleteItem") &&
+        JSON.stringify(s.Resource).includes(ASSET_TABLE),
+    );
+    expect(assetTableDeletes.length).toBeGreaterThan(0);
+  });
+
+  test("DynamoDB mode: DeletePlatformFn has no DataZone env and does not assume namespaceApiFn's role", () => {
+    const vars = deletePlatformFn().Properties.Environment.Variables;
+    expect(vars).not.toHaveProperty("DATAZONE_DOMAIN_ID");
+    expect(vars).not.toHaveProperty("PROJECT_ACCESS_ROLE_ARN");
+    const assumesNamespaceApiRole = deletePlatformStatements().some(
+      (s) =>
+        actionsOf(s).includes("sts:AssumeRole") &&
+        JSON.stringify(s.Resource).includes(NAMESPACE_API_ROLE),
+    );
+    expect(assumesNamespaceApiRole).toBe(false);
+  });
+
+  test("DynamoDB mode: state machine still has all 5 pipeline steps in order", () => {
+    const definitionCapture = new Capture();
+    template.hasResourceProperties("AWS::StepFunctions::StateMachine", {
+      DefinitionString: definitionCapture,
+    });
+    const joinParts: unknown[] = definitionCapture.asObject()["Fn::Join"][1];
+    const definitionStr = joinParts
+      .filter((part): part is string => typeof part === "string")
+      .join("");
+    const order = [
+      "DeleteSources",
+      "DeleteMetrics",
+      "DeleteOntology",
+      "DeletePlatform",
+      "Finalize",
+    ];
+    const indices = order.map((name) => definitionStr.indexOf(`"${name}"`));
+    indices.forEach((idx) => expect(idx).toBeGreaterThan(-1));
+    for (let i = 1; i < indices.length; i++) {
+      expect(indices[i]).toBeGreaterThan(indices[i - 1]);
+    }
+  });
+});

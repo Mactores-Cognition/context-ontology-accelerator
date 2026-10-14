@@ -637,3 +637,165 @@ describe("NamespaceStack", () => {
     );
   });
 });
+
+// DynamoDB metadata store (metadata_store=dynamodb). The DataZone domain and
+// everything around it is replaced by one DynamoDB table holding table/column
+// metadata. The mode is opt-in through CDK context, so every test above keeps
+// running in the default (DataZone) mode unchanged.
+describe("NamespaceStack in DynamoDB mode (metadata_store=dynamodb)", () => {
+  const PREFIX = `${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}`;
+  const ASSET_TABLE = `${PREFIX}-metadata-assets`;
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App({
+      context: { ...TEST_CONTEXT, metadata_store: "dynamodb" },
+    });
+    const depStack = new cdk.Stack(app, "DdbDepStack");
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+      allowAllOutbound: true,
+    });
+    const rolesTable = new dynamodb.Table(depStack, "Roles", {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    });
+    const rrmTable = new dynamodb.Table(depStack, "RRM", {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    });
+    template = Template.fromStack(
+      new NamespaceStack(app, "TestNamespaceDdb", {
+        vpc,
+        lambdaSecurityGroup,
+        rolesTable,
+        resourceRoleMappingsTable: rrmTable,
+      }),
+    );
+  });
+
+  /** The namespace-api Lambda resource. */
+  function namespaceApiFn(): any {
+    const fn = Object.values(
+      template.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: `${PREFIX}-namespace-api` },
+      }),
+    )[0];
+    expect(fn).toBeDefined();
+    return fn;
+  }
+
+  /** IAM statements attached to the namespace-api Lambda's role. */
+  function namespaceApiStatements(): any[] {
+    const roleId = namespaceApiFn().Properties.Role["Fn::GetAtt"][0];
+    return Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => p.Properties.Roles?.some((r: any) => r.Ref === roleId))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+  }
+
+  const actionsOf = (s: any): string[] =>
+    Array.isArray(s.Action) ? s.Action : [s.Action];
+
+  test("DynamoDB mode: creates the metadata-assets table with PK/SK", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: ASSET_TABLE,
+      KeySchema: [
+        { AttributeName: "PK", KeyType: "HASH" },
+        { AttributeName: "SK", KeyType: "RANGE" },
+      ],
+    });
+  });
+
+  test("DynamoDB mode: metadata-assets table has an AssetById GSI on assetId", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: ASSET_TABLE,
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "AssetById",
+          KeySchema: [{ AttributeName: "assetId", KeyType: "HASH" }],
+        }),
+      ]),
+    });
+  });
+
+  test("DynamoDB mode: creates no AWS::DataZone resources", () => {
+    const dataZoneTypes = Object.values(template.toJSON().Resources ?? {})
+      .map((r: any) => r.Type as string)
+      .filter((t) => t.startsWith("AWS::DataZone::"));
+    expect(dataZoneTypes).toEqual([]);
+  });
+
+  test("DynamoDB mode: creates no SMUS execution, login or project-access role", () => {
+    const roleNames = Object.values(
+      template.findResources("AWS::IAM::Role"),
+    ).map((r: any) => r.Properties?.RoleName);
+    expect(roleNames).not.toContain(`${PREFIX}-smus-exec`);
+    expect(roleNames).not.toContain(`${PREFIX}-smus-login`);
+    expect(roleNames).not.toContain(`${PREFIX}-dz-project-access`);
+  });
+
+  test("DynamoDB mode: publishes the placeholder domain id to /smus/domain-id", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/smus/domain-id`,
+      Value: "NO_DATAZONE_DOMAIN",
+    });
+  });
+
+  test("DynamoDB mode: publishes the metadata-assets table name to SSM", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/metadata-store/table-name`,
+    });
+  });
+
+  test("DynamoDB mode: NamespaceApiFn selects the DynamoDB backend and the asset table", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${PREFIX}-namespace-api`,
+      Environment: {
+        Variables: Match.objectLike({
+          METADATA_STORE_BACKEND: "dynamodb",
+          METADATA_STORE_TABLE: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test("DynamoDB mode: NamespaceApiFn has no DataZone env or permissions and can write the asset table", () => {
+    const vars = namespaceApiFn().Properties.Environment.Variables;
+    expect(vars).not.toHaveProperty("DATAZONE_DOMAIN_ID");
+    expect(vars).not.toHaveProperty("DATAZONE_PROJECT_PROFILE_ID");
+    expect(vars).not.toHaveProperty("PROJECT_ACCESS_ROLE_ARN_SSM");
+
+    const statements = namespaceApiStatements();
+    const dataZoneActions = statements
+      .flatMap(actionsOf)
+      .filter((a) => a.startsWith("datazone:"));
+    expect(dataZoneActions).toEqual([]);
+
+    // The grant targets the asset table either by reference (logical ID starts
+    // with "MetadataAssets") or by its physical name.
+    const assetTableWrites = statements.filter((s) => {
+      const resource = JSON.stringify(s.Resource);
+      return (
+        actionsOf(s).includes("dynamodb:PutItem") &&
+        (resource.includes("MetadataAssets") ||
+          resource.includes("metadata-assets"))
+      );
+    });
+    expect(assetTableWrites.length).toBeGreaterThan(0);
+  });
+
+  test("DynamoDB mode: still creates the Namespaces table", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: Match.stringLikeRegexp("namespaces$"),
+    });
+  });
+
+  test("DynamoDB mode: NamespaceApiFn is still in the VPC private subnets", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${PREFIX}-namespace-api`,
+      VpcConfig: Match.objectLike({
+        SubnetIds: Match.anyValue(),
+        SecurityGroupIds: Match.anyValue(),
+      }),
+    });
+  });
+});

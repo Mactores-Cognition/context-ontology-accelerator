@@ -39,6 +39,7 @@ from typing import Any
 from coa_common.constants import datasource_external_id
 from coa_common.dao import DynamoDBDAO
 from coa_common.domain_models import DiscoveredMetadata, ReviewStatus
+from coa_common.metadata_store.factory import is_dynamodb_backend
 from coa_common.metadata_store.reader import read_assets_for_datasource
 from coa_common.s3 import get_s3_client, read_file_bytes, upload_json
 from coa_control_plane_server.models.source_status import SourceStatus
@@ -65,7 +66,8 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 DATASOURCES_TABLE = os.environ["SOURCES_TABLE"]
 SCAN_JOBS_TABLE = os.environ["SOURCE_SCAN_JOBS_TABLE"]
-SMUS_DOMAIN_ID = os.environ["SMUS_DOMAIN_ID"]
+# Required for DataZone; the DynamoDB metadata store (METADATA_STORE_BACKEND=dynamodb) has no domain.
+SMUS_DOMAIN_ID = "" if is_dynamodb_backend() else os.environ["SMUS_DOMAIN_ID"]
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 # S3 bucket for the re-scan backup blob (pre-rescan asset forms + change-set),
 # read back by the approve/reject worker. Present on both first-scan and re-scan

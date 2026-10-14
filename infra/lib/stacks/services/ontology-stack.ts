@@ -21,7 +21,11 @@ import { Construct } from "constructs";
 import { SCLStack } from "../../constructs/scl-stack";
 import { SclMonitoring } from "../../constructs";
 import { Paths } from "../../paths";
-import { resolveContext } from "../../context";
+import {
+  isDynamoDbMetadataStore,
+  METADATA_STORE_DYNAMODB,
+  resolveContext,
+} from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
 import {
@@ -29,6 +33,7 @@ import {
   DEFAULT_BEDROCK_CHAT_MODEL_ID,
   DEFAULT_BEDROCK_INDUCTION_MODEL_ID,
 } from "../../constants";
+import { TABLE_NAMES } from "@coa/shared";
 
 export interface OntologyStackProps extends cdk.StackProps {
   readonly network: NetworkStack;
@@ -39,7 +44,8 @@ export interface OntologyStackProps extends cdk.StackProps {
    * Required: scopes the task role's DataZone IAM grants to a single
    * domain. We never deploy without one — running with no domain would
    * either need a wildcard policy (forbidden) or break the catalog reader
-   * at runtime, so fail at synth time instead.
+   * at runtime, so fail at synth time instead. Ignored with the DynamoDB
+   * metadata store (`metadata_store=dynamodb`), which has no domain.
    */
   readonly smusDomainId: string;
   /**
@@ -91,7 +97,8 @@ export class OntologyStack extends SCLStack {
     super(scope, id, props);
     this.addComponentTag("ontology-engine");
 
-    if (!props.smusDomainId) {
+    const dynamoDbStore = isDynamoDbMetadataStore(this.node);
+    if (!dynamoDbStore && !props.smusDomainId) {
       throw new Error(
         "OntologyStack requires smusDomainId — DataZone permissions cannot be granted without a domain scope.",
       );
@@ -161,15 +168,23 @@ export class OntologyStack extends SCLStack {
     // the namespace's DataZone project. The ECS task role assumes this role
     // before calling DataZone Search/GetAsset (project membership, not just
     // IAM permission, gates DataZone reads). Same pattern SourcesStack uses.
-    const projectAccessRoleArn = ssm.StringParameter.valueForStringParameter(
-      this,
-      `${ssmPrefix}/smus/dz-project-access-role-arn`,
-    );
-    const projectAccessRole = iam.Role.fromRoleArn(
-      this,
-      "ProjectAccessRole",
-      projectAccessRoleArn,
-    );
+    // With the DynamoDB metadata store the catalog reader reads
+    // NamespaceStack's metadata-assets table instead.
+    const projectAccessRoleArn = dynamoDbStore
+      ? undefined
+      : ssm.StringParameter.valueForStringParameter(
+          this,
+          `${ssmPrefix}/smus/dz-project-access-role-arn`,
+        );
+    const projectAccessRole = projectAccessRoleArn
+      ? iam.Role.fromRoleArn(this, "ProjectAccessRole", projectAccessRoleArn)
+      : undefined;
+    const metadataAssetsTable = dynamoDbStore
+      ? dynamodb.Table.fromTableAttributes(this, "MetadataAssetsTable", {
+          tableName: this.prefixed(TABLE_NAMES.METADATA_ASSETS),
+          globalIndexes: ["AssetById"],
+        })
+      : undefined;
 
     // ================================================================
     // DynamoDB Table (single-table PK/SK design)
@@ -268,11 +283,18 @@ export class OntologyStack extends SCLStack {
         // and applies content filtering to LLM calls (constraint inference).
         GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/guardrail-id`,
         CATALOG_SOURCE: "smus",
-        SMUS_DOMAIN_ID: props.smusDomainId,
+        ...(metadataAssetsTable
+          ? {
+              METADATA_STORE_BACKEND: METADATA_STORE_DYNAMODB,
+              METADATA_STORE_TABLE: metadataAssetsTable.tableName,
+            }
+          : { SMUS_DOMAIN_ID: props.smusDomainId }),
         NAMESPACES_TABLE: namespacesTableName,
         DATASOURCES_TABLE: sourcesTableName,
         SOURCES_TABLE: sourcesTableName,
-        PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        ...(projectAccessRoleArn && {
+          PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        }),
         SOURCES_API_FN_NAME: `${this.prefixed("sources-api")}`,
         INDUCE_OUTPUT_DIR: "/tmp/induce",
         PORT: String(this.containerPort),
@@ -441,21 +463,26 @@ export class OntologyStack extends SCLStack {
     // 2. Project membership — granted by assuming ``projectAccessRole``,
     //    which is registered as a DataZone project member in NamespaceStack.
     //    DataZone gates Search/GetAsset on project membership, not IAM alone.
-    taskDef.taskRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "datazone:GetAsset",
-          "datazone:SearchAssets",
-          "datazone:Search",
-          "datazone:GetProject",
-        ],
-        resources: [
-          `arn:aws:datazone:${region}:${account}:domain/${props.smusDomainId}`,
-          `arn:aws:datazone:${region}:${account}:domain/${props.smusDomainId}/*`,
-        ],
-      }),
-    );
-    projectAccessRole.grantAssumeRole(taskDef.taskRole);
+    // With the DynamoDB metadata store: read access to the metadata-assets
+    // table instead.
+    if (projectAccessRole) {
+      taskDef.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "datazone:GetAsset",
+            "datazone:SearchAssets",
+            "datazone:Search",
+            "datazone:GetProject",
+          ],
+          resources: [
+            `arn:aws:datazone:${region}:${account}:domain/${props.smusDomainId}`,
+            `arn:aws:datazone:${region}:${account}:domain/${props.smusDomainId}/*`,
+          ],
+        }),
+      );
+      projectAccessRole.grantAssumeRole(taskDef.taskRole);
+    }
+    metadataAssetsTable?.grantReadData(taskDef.taskRole);
 
     // Sources Lambda — invoke for catalog column fetching during induction
     taskDef.taskRole.addToPrincipalPolicy(

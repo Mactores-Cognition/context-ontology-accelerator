@@ -3856,7 +3856,7 @@ def _review_env():
     """
     mock_ns_dao = dao_double()
     mock_ns_dao.get.return_value = {"dataZoneProjectId": "proj-123"}
-    mock_smus = create_autospec(_dr.SMUSClient, instance=True)
+    mock_smus = create_autospec(_dr.MetadataStoreClient, instance=True)
     mock_dao = dao_double()
     mock_dao.get.return_value = {
         "PK": f"NS#{_NAMESPACE_ID}",

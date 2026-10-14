@@ -39,8 +39,9 @@ class SearchResult:
 class MetadataStoreClient(ABC):
     """Abstract interface for metadata store operations.
 
-    Implementations may target SageMaker Unified Studio (SMUS),
-    AWS Glue Data Catalog, or any other catalog backend.
+    Implementations target SageMaker Unified Studio (``SMUSClient``) or a
+    DynamoDB table (``DynamoDBMetadataStore``); ``factory.get_metadata_store``
+    picks one from ``METADATA_STORE_BACKEND``.
     """
 
     # ── Projects ──────────────────────────────────────────────────
@@ -145,6 +146,17 @@ class MetadataStoreClient(ABC):
 
         Raises:
             MetadataStoreError: on failure.
+        """
+
+    @abstractmethod
+    def find_asset_by_name(self, *, project_id: str, name: str) -> AssetResult | None:
+        """Look an asset up by its exact name.
+
+        Returns ``None`` when no asset in the project has that name.
+
+        Raises:
+            MetadataStoreError: if the lookup itself fails, so a caller never
+                reads "not found" out of a broken lookup.
         """
 
     @abstractmethod

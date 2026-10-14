@@ -623,10 +623,10 @@ def _apply_column_metadata(table: Table, column_results: list[dict]) -> None:
 
 
 def _write_enriched_assets(tables: list[Table], domain_id: str, project_id: str) -> None:
-    """Write enriched tables back to DataZone as asset revisions."""
-    from coa_common.metadata_store import SMUSClient
+    """Write enriched tables back to the metadata store (DataZone or DynamoDB) as asset revisions."""
+    from coa_common.metadata_store import get_metadata_store
 
-    client = SMUSClient(
+    client = get_metadata_store(
         domain_id=domain_id,
         region_name=AWS_REGION,
         assume_role_arn=os.environ.get("PROJECT_ACCESS_ROLE_ARN"),

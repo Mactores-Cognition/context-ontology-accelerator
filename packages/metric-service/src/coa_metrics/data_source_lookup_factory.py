@@ -8,7 +8,8 @@ Resolves namespace → DataZone project → SmusCatalogDataSourceLookup.
 Required env vars (set by MetricServiceStack):
   DATA_SOURCES_TABLE      — unified sources table (PK=NS#, SK=SRC#)
   NAMESPACES_TABLE        — namespace registry (resolves dataZoneProjectId)
-  SMUS_DOMAIN_ID          — DataZone domain ID
+  SMUS_DOMAIN_ID          — DataZone domain ID (not set, and not required, when
+                            METADATA_STORE_BACKEND=dynamodb)
   PROJECT_ACCESS_ROLE_ARN — role assumed by the catalog reader for DataZone
 
 Returns None when config is missing or the namespace has no provisioned
@@ -24,6 +25,7 @@ import os
 import structlog
 from botocore.exceptions import ClientError
 from coa_common.dao import DynamoDBDAO
+from coa_common.metadata_store import metadata_store_configured
 
 from coa_metrics.lookups import DataSourceLookup, SmusCatalogDataSourceLookup
 
@@ -80,7 +82,8 @@ def build_data_source_lookup(namespace_id: str) -> DataSourceLookup | None:
         for name, val in (
             ("DATA_SOURCES_TABLE", sources_table),
             ("NAMESPACES_TABLE", namespaces_table),
-            ("SMUS_DOMAIN_ID", domain_id),
+            # SMUS_DOMAIN_ID, or METADATA_STORE_TABLE with the DynamoDB store.
+            ("SMUS_DOMAIN_ID", metadata_store_configured(domain_id)),
         )
         if not val
     ]

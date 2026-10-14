@@ -27,6 +27,7 @@ import structlog
 from coa_common import async_boto_config
 from coa_common.constants import graphrag_index_names
 from coa_common.dao import DynamoDBDAO, QueryParams
+from coa_common.metadata_store import get_metadata_store, is_dynamodb_backend
 from coa_common.opensearch import AossVectorClient
 
 logger = structlog.get_logger(__name__)
@@ -66,8 +67,21 @@ def delete_smu_project(namespace_id: str, item: dict[str, Any]) -> None:
     Calling with the execution role's own (IAM-permitted but non-owner)
     identity returns AccessDeniedException regardless of the execution
     role's IAM policy.
+
+    With the DynamoDB metadata store (METADATA_STORE_BACKEND=dynamodb) there is
+    no DataZone project: the namespace's asset items are deleted from the
+    metadata-assets table instead (raises MetadataStoreError on failure).
     """
     project_id = item.get("dataZoneProjectId")
+    if is_dynamodb_backend():
+        if not project_id:
+            logger.info("metadata_assets_skip", namespace_id=namespace_id, project_id=project_id)
+            return
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        get_metadata_store(region_name=region).delete_project(project_id=project_id)
+        logger.info("metadata_assets_deleted", namespace_id=namespace_id, project_id=project_id)
+        return
+
     domain_id = os.environ.get("DATAZONE_DOMAIN_ID")
     if not project_id or not domain_id:
         logger.info("smu_project_skip", namespace_id=namespace_id, project_id=project_id, domain_id=domain_id)

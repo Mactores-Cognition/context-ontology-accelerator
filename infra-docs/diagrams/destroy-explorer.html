@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>COA destroy flow explorer</title>
+<!--
+  Interactive companion to destroy-flow.mmd.
+  Self-contained: no build, no network, no dependencies. Open in any browser.
+
+  Data is a hand-authored snapshot of:
+    scripts/destroy.sh      the 7 steps, their wait budgets and failure modes
+    infra/bin/app.ts        the stack graph, walked in reverse
+    Makefile                destroy-dev target
+
+  NOT taken from infra/README.md, which is stale on this flow: it documents
+  5 steps (there are 7) and says the step-2 ENI wait is commented out (it is
+  active, at scripts/destroy.sh:181-239).
+
+  Colours: dataviz reference palette, categorical slots 1-3 + status tokens.
+  Status colour always ships with an icon + label, never alone.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb; --plane: #f9f9f7; --surface-2: #f2f1ed;
+    --ink-1: #0b0b0b; --ink-2: #52514e; --ink-muted: #898781;
+    --hair: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,.10);
+    --foundation: #2a78d6; --service: #eb6834; --external: #1baf7a;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --shadow: 0 1px 2px rgba(11,11,11,.05), 0 8px 24px rgba(11,11,11,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --plane: #0d0d0d; --surface-2: #232321;
+      --ink-1: #f0efec; --ink-2: #c3c2b7; --ink-muted: #898781;
+      --hair: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+      --foundation: #3987e5; --service: #d95926; --external: #199e70;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --plane: #0d0d0d; --surface-2: #232321;
+    --ink-1: #f0efec; --ink-2: #c3c2b7; --ink-muted: #898781;
+    --hair: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+    --foundation: #3987e5; --service: #d95926; --external: #199e70;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--plane); color: var(--ink-1);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  code { font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 3px; }
+
+  header.top { display: flex; align-items: flex-start; gap: 20px; padding: 22px 24px 16px;
+               border-bottom: 1px solid var(--hair); background: var(--surface-1); }
+  header.top h1 { margin: 0 0 4px; font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+  header.top p { margin: 0; color: var(--ink-2); font-size: 13px; max-width: 76ch; }
+  .spacer { flex: 1; }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+              padding: 12px 24px; border-bottom: 1px solid var(--hair);
+              background: var(--surface-1); position: sticky; top: 0; z-index: 20; }
+  .ctl-group { display: flex; align-items: center; gap: 8px; }
+  .ctl-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+  .seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden; }
+  .seg button { appearance: none; border: 0; background: transparent; color: var(--ink-2);
+                font: inherit; font-size: 13px; padding: 7px 13px; cursor: pointer; min-height: 34px; }
+  .seg button + button { border-left: 1px solid var(--axis); }
+  .seg button[aria-pressed="true"] { background: var(--ink-1); color: var(--surface-1); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--foundation); outline-offset: -2px; }
+  .btn { appearance: none; background: var(--surface-1); color: var(--ink-1); border: 1px solid var(--axis);
+         border-radius: 6px; font: inherit; font-size: 13px; padding: 7px 12px; cursor: pointer;
+         min-height: 34px; min-width: 34px; }
+  .btn:hover { background: var(--surface-2); }
+  .btn:focus-visible { outline: 2px solid var(--foundation); outline-offset: 1px; }
+  .btn[disabled] { opacity: .4; cursor: default; }
+  .btn.primary { background: var(--ink-1); color: var(--surface-1); border-color: var(--ink-1); font-weight: 600; }
+  .stepreadout { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; min-width: 24ch; }
+
+  .wrap { display: grid; grid-template-columns: minmax(0,1fr) 372px; align-items: start; }
+  @media (max-width: 1080px) { .wrap { grid-template-columns: 1fr; } }
+  .stage { padding: 18px 10px 10px 24px; min-width: 0; }
+  .panel { border-left: 1px solid var(--hair); background: var(--surface-1); padding: 18px 22px 28px;
+           min-height: 70vh; position: sticky; top: 59px; max-height: calc(100vh - 59px); overflow-y: auto; }
+
+  .graphcard { background: var(--surface-1); border: 1px solid var(--hair); border-radius: 8px; box-shadow: var(--shadow); }
+  .graphhead { display: flex; align-items: baseline; gap: 10px; padding: 14px 18px 0; flex-wrap: wrap; }
+  .graphhead h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  .graphhead .sub { font-size: 12px; color: var(--ink-2); }
+  .zoomrow { display: flex; gap: 6px; padding: 10px 18px 0; }
+  .zoomrow .btn { padding: 4px 9px; min-height: 28px; font-size: 12px; }
+  svg.graph { display: block; width: 100%; height: 650px; touch-action: none; cursor: grab; }
+  svg.graph.dragging { cursor: grabbing; }
+
+  .edge { fill: none; stroke: var(--axis); stroke-width: 1.25; }
+  .edge.hl { stroke: var(--critical); stroke-width: 2; }
+  .edge.hl-down { stroke: var(--foundation); stroke-width: 2; }
+  .edge.dim { opacity: .12; }
+  /* network, auth and authnz are referenced by almost every stack. At full
+     strength their edges bury the chain, so they recede until selected. */
+  .edge.ambient { opacity: .16; }
+  .edge.ambient.hl, .edge.ambient.hl-down { opacity: 1; }
+  .lvlband { fill: var(--surface-2); }
+  .lvllabel { fill: var(--ink-muted); font-size: 10.5px; font-weight: 700; letter-spacing: .07em; }
+  .lvlnote { fill: var(--ink-muted); font-size: 10.5px; }
+
+  g.node { cursor: pointer; }
+  g.node rect.body { fill: var(--surface-1); stroke: var(--ring); stroke-width: 1; }
+  g.node text.nm { fill: var(--ink-1); font-size: 13px; font-weight: 600; }
+  g.node text.meta { fill: var(--ink-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  g.node text.tag { font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+  g.node:focus { outline: none; }
+  g.node:focus-visible rect.body, g.node.sel rect.body { stroke: var(--ink-1); stroke-width: 2; }
+  g.node.dim { opacity: .18; }
+  g.node.pending rect.body { stroke-dasharray: 3 3; stroke: var(--axis); }
+  g.node.pending text.nm { fill: var(--ink-muted); }
+  g.node.done rect.body { fill: var(--surface-2); }
+  g.node.done text.nm { text-decoration: line-through; fill: var(--ink-muted); }
+  g.node.active rect.body { stroke: var(--ink-1); stroke-width: 2; }
+  @keyframes pulse { 0%,100% { opacity: .9; } 50% { opacity: .25; } }
+  /* Base rule is load-bearing: without it SVG's default fill:black paints a box behind every node. */
+  g.node rect.pulse { fill: none; stroke: none; }
+  g.node:not(.active) rect.pulse { display: none; }
+  g.node.active rect.pulse { stroke: var(--ink-1); stroke-width: 2; animation: pulse 1.3s ease-in-out infinite; }
+  g.node rect.accent { stroke: none; }
+  @media (prefers-reduced-motion: reduce) { g.node.active rect.pulse { animation: none; } }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 20px; padding: 12px 18px 16px; border-top: 1px solid var(--hair); margin-top: 8px; }
+  .lg { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-2); }
+  .lg svg { display: block; }
+
+  .panel h2 { margin: 0 0 2px; font-size: 16px; font-weight: 650; word-break: break-word; }
+  .panel .kindrow { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; flex-wrap: wrap; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650;
+           padding: 3px 8px; border-radius: 999px; border: 1px solid var(--ring);
+           background: var(--surface-2); color: var(--ink-2); }
+  .badge.stop   { border-color: var(--critical); color: var(--critical); }
+  .badge.warn   { border-color: var(--warning); color: var(--ink-1); }
+  .badge.ok     { border-color: var(--good); color: var(--good); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .sq { width: 8px; height: 8px; flex: none; }
+  .panel h3 { margin: 18px 0 7px; font-size: 10.5px; font-weight: 700; letter-spacing: .07em;
+              text-transform: uppercase; color: var(--ink-muted); }
+  .panel p { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
+  .kv dt { color: var(--ink-muted); }
+  .kv dd { margin: 0; color: var(--ink-1); }
+  ul.deps { list-style: none; margin: 0; padding: 0; }
+  ul.deps li { padding: 7px 0; border-top: 1px solid var(--hair); font-size: 12.5px; }
+  ul.deps li:first-child { border-top: 0; }
+  ul.deps .dn { font-weight: 600; color: var(--ink-1); display: inline-flex; align-items: center; gap: 6px; }
+  ul.deps .dw { display: block; color: var(--ink-2); margin-top: 2px; }
+  ul.deps .via { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+                 color: var(--ink-muted); border: 1px solid var(--hair); border-radius: 3px; padding: 0 4px; margin-left: 4px; }
+  .jump { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--foundation);
+          cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .empty { color: var(--ink-muted); font-size: 12.5px; font-style: italic; }
+  .callout { border-left: 3px solid var(--warning); background: var(--surface-2); padding: 9px 12px;
+             font-size: 12.5px; color: var(--ink-2); border-radius: 0 4px 4px 0; margin: 10px 0 0; }
+  .callout.crit { border-left-color: var(--critical); }
+  .callout.ok { border-left-color: var(--good); }
+  .callout strong { color: var(--ink-1); }
+
+  [role="tabpanel"][hidden] { display: none; }
+  table.tv { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.tv caption { text-align: left; color: var(--ink-2); font-size: 12.5px; padding: 0 0 10px; max-width: 100ch; }
+  table.tv th, table.tv td { text-align: left; vertical-align: top; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--hair); }
+  table.tv th { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); white-space: nowrap; }
+  table.tv td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.tv tbody tr:hover { background: var(--surface-2); }
+  .onstop { font-weight: 650; white-space: nowrap; }
+
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 20px; }
+  .tile { flex: 1 1 150px; background: var(--surface-1); border: 1px solid var(--hair); border-radius: 8px; padding: 14px 16px; }
+  .tile .tv1 { font-size: 27px; font-weight: 650; letter-spacing: -.02em; line-height: 1.1; }
+  .tile .tl { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
+  .chartcard { background: var(--surface-1); border: 1px solid var(--hair); border-radius: 8px;
+               padding: 16px 18px 10px; box-shadow: var(--shadow); }
+  .chartcard h3 { margin: 0 0 2px; font-size: 14px; font-weight: 650; letter-spacing: 0; text-transform: none; color: var(--ink-1); }
+  .chartcard .sub { font-size: 12px; color: var(--ink-2); margin: 0 0 14px; }
+  .grid-line { stroke: var(--hair); stroke-width: 1; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .axis-txt { fill: var(--ink-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .barlbl { fill: var(--ink-1); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .prose { max-width: 80ch; }
+  .prose p { font-size: 13px; color: var(--ink-2); }
+  .prose h3 { font-size: 14px; margin: 22px 0 6px; }
+
+  .tooltip { position: fixed; z-index: 90; pointer-events: none; opacity: 0;
+             background: var(--surface-1); color: var(--ink-1); border: 1px solid var(--ring);
+             box-shadow: var(--shadow); border-radius: 6px; padding: 8px 11px; font-size: 12px;
+             max-width: 300px; transition: opacity .09s; }
+  .tooltip strong { display: block; font-size: 12.5px; margin-bottom: 2px; }
+  .tooltip span { color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1>COA destroy flow — <code>make destroy-dev</code></h1>
+    <p>Six steps clean up resources <strong>CloudFormation does not own</strong>, then
+       <code>cdk destroy --all</code> walks the deploy graph in exact reverse — one stack at a time.
+       Two steps <strong>hard-stop</strong> rather than continue. Steps 1–6 are idempotent, so re-running resumes.</p>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn" id="theme" aria-label="Toggle colour theme">◐ Theme</button>
+</header>
+
+<div class="controls">
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-view">View</span>
+    <div class="seg" role="group" aria-labelledby="lbl-view">
+      <button id="v-steps" aria-pressed="true">Steps</button>
+      <button id="v-stacks" aria-pressed="false">Reverse order</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-ord">Stacks</span>
+    <div class="seg" role="group" aria-labelledby="lbl-ord">
+      <button id="o-levels" aria-pressed="true">Levels</button>
+      <button id="o-seq" aria-pressed="false">Sequence</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-hl">Highlight</span>
+    <div class="seg" role="group" aria-labelledby="lbl-hl">
+      <button id="h-on" aria-pressed="true">Blocking</button>
+      <button id="h-off" aria-pressed="false">Off</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-step">Walk</span>
+    <button class="btn" id="s-prev" aria-label="Previous">◀</button>
+    <button class="btn primary" id="s-play">▶ Play</button>
+    <button class="btn" id="s-next" aria-label="Next">▶</button>
+    <button class="btn" id="s-reset">Reset</button>
+    <span class="stepreadout" id="s-read" role="status" aria-live="polite">not started</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="seg" role="tablist" aria-label="Views">
+    <button role="tab" id="t-graph" aria-selected="true" aria-controls="p-graph" aria-pressed="true">Flow</button>
+    <button role="tab" id="t-risk" aria-selected="false" aria-controls="p-risk" aria-pressed="false">Wait budgets</button>
+    <button role="tab" id="t-table" aria-selected="false" aria-controls="p-table" aria-pressed="false">Table</button>
+  </div>
+</div>
+
+<!-- ══ FLOW ═══════════════════════════════════════════════════ -->
+<div id="p-graph" role="tabpanel" aria-labelledby="t-graph">
+  <div class="wrap">
+    <div class="stage">
+      <div class="graphcard">
+        <div class="graphhead">
+          <h2 id="g-title">Steps 0–7 — scripts/destroy.sh</h2>
+          <span class="sub" id="g-sub">Top to bottom. Steps 1–6 delete what CloudFormation cannot; step 7 is the only CDK call.</span>
+        </div>
+        <div class="zoomrow">
+          <button class="btn" id="z-in" aria-label="Zoom in">＋</button>
+          <button class="btn" id="z-out" aria-label="Zoom out">－</button>
+          <button class="btn" id="z-fit">Fit</button>
+          <span class="sub" style="align-self:center;color:var(--ink-muted)">drag to pan · scroll to zoom</span>
+        </div>
+        <svg class="graph" id="svg" role="img" aria-labelledby="g-title">
+          <g id="viewport"><g id="bands"></g><g id="edges"></g><g id="nodes"></g></g>
+        </svg>
+        <div class="legend" id="legend"></div>
+      </div>
+    </div>
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+  </div>
+</div>
+
+<!-- ══ WAIT BUDGETS ═══════════════════════════════════════════ -->
+<div id="p-risk" role="tabpanel" aria-labelledby="t-risk" hidden>
+  <div style="padding:22px 24px 40px;max-width:1000px">
+    <div class="tiles">
+      <div class="tile"><div class="tv1">7</div><div class="tl">Steps in <code>destroy.sh</code></div></div>
+      <div class="tile"><div class="tv1">6</div><div class="tl">Clean up what CFN does not own</div></div>
+      <div class="tile"><div class="tv1">2</div><div class="tl">Steps that hard-stop the script</div></div>
+      <div class="tile"><div class="tv1">55</div><div class="tl">Minutes of wait budget, worst case</div></div>
+    </div>
+
+    <div class="chartcard">
+      <h3>How long each step will wait before giving up</h3>
+      <p class="sub">Every budget is an env-var override. Bars are the defaults, in minutes.
+         Red bars <strong>exit the script</strong> on timeout; amber bars warn and continue into
+         <code>cdk destroy</code> anyway.</p>
+      <svg id="budgets" role="img" aria-label="Horizontal bar chart of default wait budgets per teardown step, in minutes. Connector stacks 30, AgentCore ENIs 10, VKG services 5, DataZone domain 5, Cloud Map services 3." style="width:100%;height:250px"></svg>
+    </div>
+
+    <div class="prose">
+      <h3>Why connector stacks get 30 minutes</h3>
+      <p>The COA-operated Databricks connector is VPC-attached. Its security group cannot be deleted
+         until Lambda releases the function's ENIs, which can take up to 20 minutes. Giving up sooner
+         leaves the group behind, and step 7 then fails to delete the VPC it sits in.</p>
+      <h3>Why the AgentCore ENI wait is the one that stops everything</h3>
+      <p>AgentCore Runtime ENIs are provisioned outside CloudFormation and are <em>not</em> waited on by
+         CFN. They have been observed taking hours to detach after a runtime delete. While any remain
+         attached, <code>DeleteSecurityGroup</code> fails with <code>DependencyViolation</code> — so
+         continuing into <code>cdk destroy</code> would burn a long run to reach a guaranteed failure.
+         The script exits instead and tells you to come back later.</p>
+      <h3>The 55-minute figure</h3>
+      <p>Sum of the five default budgets (30 + 10 + 5 + 5 + 3). It is the <em>waiting</em> ceiling only —
+         it excludes <code>cdk destroy --all</code> itself, which has no budget here and is bounded by
+         CloudFormation.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ══ TABLE ══════════════════════════════════════════════════ -->
+<div id="p-table" role="tabpanel" aria-labelledby="t-table" hidden>
+  <div style="padding:22px 24px 16px">
+    <table class="tv" id="tvsteps">
+      <caption>The seven steps, in order. <strong>On timeout</strong> is what the script does when the
+        wait budget runs out — the difference between an exit and a warning is deliberate, and is the
+        single most useful thing to know when a teardown stalls.</caption>
+      <thead><tr><th>#</th><th>Step</th><th>Deletes</th><th>Why CFN can't</th><th>Budget</th><th>On timeout</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div style="padding:8px 24px 40px">
+    <table class="tv" id="tvstacks">
+      <caption>Step 7 in detail — <code>cdk destroy --all</code> in reverse dependency order.
+        <strong>Must go first</strong> lists the stacks CloudFormation has to delete <em>before</em> this one,
+        because they hold references into it.</caption>
+      <thead><tr><th>#</th><th>Stack</th><th>Level</th><th>Must go first</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="tooltip" id="tip" role="presentation"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   DATA — snapshot of scripts/destroy.sh + infra/bin/app.ts
+   ════════════════════════════════════════════════════════════════ */
+
+/* outcome: stop = exits the script · warn = warns and continues · ok = clean · plain */
+const STEPS = [
+  { id:"gate", n:"Step 0", t:"Gates", outcome:"stop", budget:null, mins:0,
+    deletes:"Nothing — validation only",
+    whycfn:"",
+    body:`Three checks before anything is touched.`,
+    items:[
+      ["Input validation","<code>ENV</code>, <code>SCL_PREFIX</code> and <code>SCL_PROJECT_TAG</code> are charset-checked. They are interpolated into shell commands, and a <code>SCL_PREFIX</code> mismatch is the quiet failure mode: the script would resolve <code>scl-*</code> names while <code>cdk</code> operates on <code>coa-*</code>, so every lookup silently misses."],
+      ["Credentials","<code>aws sts get-caller-identity</code> must succeed. Hard exit otherwise."],
+      ["Confirmation","Prompts for a literal <code>yes</code> when interactive. Skip with <code>SCL_DESTROY_YES=1</code> — which is how CI runs it."]
+    ],
+    callout:`<strong>Default prefix matters.</strong> <code>PREFIX=\${SCL_PREFIX:-coa}</code> must match the CDK app's <code>DEFAULT_RESOURCE_PREFIX</code>. This drifted once, when the default was still <code>scl</code>.` },
+
+  { id:"s1", n:"Step 1", t:"Delete AgentCore Runtimes", outcome:"plain", budget:null, mins:0,
+    deletes:"The <code>serve</code> and <code>mcp</code> AgentCore Runtimes, via <code>bedrock-agentcore-control delete-agent-runtime</code>",
+    whycfn:"CloudFormation creates the runtimes but does not wait for their ENIs to detach on delete. Letting <code>cdk destroy</code> reach them means hitting <code>DependencyViolation</code> on the security group much later in the run.",
+    body:`Resolves each runtime id from SSM <code>/serve/runtime-arn</code> and <code>/mcp/runtime-arn</code>,
+           then deletes both. Deliberately first in the script, to start the ENI-detach clock as early as possible.`,
+    items:[
+      ["Security groups are captured first","Before deleting, the script reads each runtime's <code>networkConfiguration</code> to record its security group — after delete the API may stop returning it, and step 2 needs those ids."],
+      ["Name-based fallback","If no SG resolves via the API (runtime already gone, ENIs still draining from an earlier run), it falls back to matching <code>&lt;prefix&gt;-&lt;env&gt;-*AgentCoreSG*</code> and <code>*McpSG*</code> by name."],
+      ["Failures are tolerated","A failed <code>delete-agent-runtime</code> warns and continues — it usually means already deleted."]
+    ] },
+
+  { id:"s2", n:"Step 2", t:"Wait for AgentCore ENIs to detach", outcome:"stop",
+    budget:"SCL_ENI_WAIT_MAX_SECONDS", mins:10,
+    deletes:"Nothing — waits for AWS to release ENIs",
+    whycfn:"The ENIs are provisioned by AgentCore outside CloudFormation. Nothing in the stack knows they exist, so nothing waits for them.",
+    body:`Polls <code>describe-network-interfaces</code> for each captured security group every 15 seconds
+           until the count reaches zero.`,
+    items:[
+      ["This is the hard stop","If ENIs are still attached when the budget runs out, the script <strong>exits 1</strong>. It does not proceed, because <code>DeleteSecurityGroup</code> would fail with <code>DependencyViolation</code> regardless."],
+      ["Hours, not minutes","Detach has been observed taking up to several hours after runtime delete. This is known AgentCore behaviour, not a hang — the same issue is reported against the Terraform provider."],
+      ["API failures are not success","A failed <code>describe-network-interfaces</code> is treated as still-attached and retried, never as zero. If the API keeps failing through the whole budget, the script exits and prints the manual check."]
+    ],
+    callout:`<strong>Recovery is cheap.</strong> The runtimes are already deleted by the time you get here, so re-running <code>make destroy-dev</code> in a few hours skips straight back to this wait. Do <em>not</em> run <code>cdk destroy</code> by hand to get around it.` },
+
+  { id:"s3", n:"Step 3", t:"Delete VKG ECS services", outcome:"stop",
+    budget:"SCL_ECS_WAIT_MAX_SECONDS", mins:5,
+    deletes:"Every active service in the <code>&lt;prefix&gt;-&lt;env&gt;-vkg-cluster</code> ECS cluster",
+    whycfn:"These are per-namespace services created <strong>at runtime</strong> by the VKG reload Lambda reacting to <code>ontology.published</code> events. CloudFormation owns the cluster and task definition, but has no record of the services.",
+    body:`Scales each service to zero, deletes it with <code>--force</code>, then waits for all of them to
+           reach <code>INACTIVE</code>.`,
+    items:[
+      ["Without this step","ECS <code>DeleteCluster</code> fails with <code>ClusterContainsServicesException</code> and the VKG stack lands in DELETE_FAILED."],
+      ["Already-gone is success","<code>ServiceNotFoundException</code>, <code>ServiceNotActiveException</code> and <code>ClusterNotFoundException</code> are all treated as fine and skipped."],
+      ["Two different failure paths","A failing <code>delete-service</code> API call <strong>exits 1</strong>. A budget timeout with services still draining only <strong>warns</strong> and continues — <code>cdk destroy</code> may still succeed, and if it doesn't, re-running resumes."],
+      ["API failures are not success","A failed <code>describe-services</code> is treated as still-active and retried, never as zero remaining."]
+    ] },
+
+  { id:"s4", n:"Step 4", t:"Delete Cloud Map services", outcome:"warn",
+    budget:"SCL_CLOUDMAP_WAIT_MAX_SECONDS", mins:3,
+    deletes:"Every service registered inside the <code>&lt;prefix&gt;-&lt;env&gt;-services.local</code> private DNS namespace",
+    whycfn:"CloudFormation owns the <em>namespace</em> (network-stack) but <strong>not the services inside it</strong> — those are created at runtime by the VKG reload Lambda via <code>servicediscovery:CreateService</code>.",
+    body:`Deregisters every instance from each service, then deletes the service, retrying until the
+           instance count actually reaches zero.`,
+    items:[
+      ["Without this step","<code>DeleteNamespace</code> fails while any service remains, which puts the <strong>network stack</strong> — the very last thing to go — into DELETE_FAILED."],
+      ["Deregister before delete","<code>DeleteService</code> returns <code>ResourceInUse</code> while any instance is registered. ECS normally deregisters its own when tasks stop in step 3, but a service whose tasks were already gone can still hold them."],
+      ["Deregistration is async","Hence the retry loop rather than a single delete-and-hope. Bounded so one stuck service cannot hang the teardown."],
+      ["Filtered by namespace id, never by name","Service names inside the namespace are per-COA-namespace and carry no prefix — with two deployments in one account, filtering by name could match the other one's services."]
+    ],
+    callout:`The application's own namespace-delete flow (<code>namespace-deletion-pipeline.ts</code>) cleans these up normally. This script never takes that path, so anything left behind has to be cleared here.` },
+
+  { id:"s5", n:"Step 5", t:"Force-delete the DataZone domain", outcome:"warn",
+    budget:"SCL_DOMAIN_WAIT_MAX_SECONDS", mins:5,
+    deletes:"The DataZone / SMUS domain and — by cascade — every project, asset and asset type under it",
+    whycfn:"The domain's children are <code>RemovalPolicy.RETAIN</code> in <code>namespace-stack.ts</code>, specifically so CloudFormation never attempts and fails to delete them. This step is what actually tears the tree down.",
+    body:`Reads the domain id from SSM <code>/smus/domain-id</code> and calls
+           <code>datazone delete-domain --skip-deletion-check</code>, then polls until it is gone.`,
+    items:[
+      ["Why CFN's own cascade isn't enough","CloudFormation already calls <code>DeleteProject</code> with <code>skipDeletionCheck=true</code> (confirmed via CloudTrail). But that cascade stops at cross-project asset-type references: a shared asset type like <code>CoaRelationalTable</code>, owned by the system project, cannot be force-deleted while <em>other</em> projects' assets still use it."],
+      ["And every namespace is such a project","Each one holds its own scanned-table assets of that type — so this is the normal case, not an edge case."],
+      ["The resulting stall, confirmed against a real stuck stack","System project DELETE_FAILED (\"failed to stabilize\") → <code>DefaultProjectProfile</code> → the domain itself (\"Domain cannot be deleted because there are existing projects under this domain\")."],
+      ["AccessDenied means deleted","DataZone returns <code>AccessDeniedException</code>, not <code>ResourceNotFound</code>, for an already-deleted domain. The poll treats both as gone."]
+    ] },
+
+  { id:"s6", n:"Step 6", t:"Delete connector stacks", outcome:"warn",
+    budget:"SCL_CONNECTOR_DELETE_WAIT_MAX_SECONDS", mins:30,
+    deletes:"Every <code>&lt;prefix&gt;-&lt;env&gt;-*-coa-connector</code> CloudFormation stack",
+    whycfn:"Connectors live in separate CDK apps under <code>connectors/</code>, its own pnpm workspace — so <code>cdk destroy --all</code> never sees them. Left behind, each keeps a spill bucket and a customer-managed KMS key alive.",
+    body:`Matched by <em>suffix</em>, not named one by one, so a connector added later is torn down without
+           editing the script. Deleted through plain CloudFormation rather than <code>cdk destroy</code>.`,
+    items:[
+      ["Why not cdk destroy","That would synthesize the connector's app, which reads COA's serve and discovery role ARNs from SSM. By teardown those parameters may already be gone, so synth would fail and block the whole step. Everything the stack owns is <code>RemovalPolicy.DESTROY</code>, so CloudFormation clears it unaided."],
+      ["30-minute budget, and why","The COA-operated Databricks connector is VPC-attached: its security group cannot be deleted until Lambda releases the function's ENIs, up to 20 minutes. Give up sooner and the group survives — and step 7 then fails to delete the VPC it sits in."],
+      ["The default waiter is replaced on purpose","<code>aws cloudformation wait</code> defaults to 120 × 30s = 60 minutes per stack, and a ROLLBACK_FAILED stack never finishes — an unbounded wait would eat the whole job having printed only \"Deleting…\"."]
+    ],
+    callout:`<strong>Not covered:</strong> a connector deployed with a custom <code>FUNCTION_NAME_PREFIX</code> carries a name this filter cannot predict. It must be destroyed by hand.` },
+
+  { id:"s7", n:"Step 7", t:"cdk destroy --all", outcome:"plain", budget:null, mins:0,
+    deletes:"All 16 platform stacks, in reverse dependency order",
+    whycfn:"",
+    body:`<code>pnpm --filter coa-infra exec cdk destroy --all --force</code>, with the same context
+           resolution as <code>deploy.sh</code> so it tears down exactly what was created.`,
+    items:[
+      ["Reverse of the deploy graph","CDK walks the same <code>addDependency()</code> edges backwards. The script hand-rolls no stack ordering — switch to <strong>Reverse order</strong> above to see it."],
+      ["Sequential, again","One stack at a time. There is no concurrency flag here either."],
+      ["network goes last","Which is why steps 3 and 4 matter: a leftover ECS service or Cloud Map service surfaces as a failure in the final stack of the run."]
+    ] },
+
+  { id:"verify", n:"Verify", t:"Post-destroy verification", outcome:"ok", budget:null, mins:0,
+    deletes:"Nothing — reports",
+    whycfn:"",
+    body:`Lists every remaining <code>&lt;prefix&gt;-&lt;env&gt;-*</code> stack in any live status and, if there
+           are none, exits clean.`,
+    items:[
+      ["The status list is deliberately broad","<code>CREATE_FAILED</code>, <code>DELETE_FAILED</code>, <code>ROLLBACK_FAILED</code> and <code>UPDATE_ROLLBACK_FAILED</code> all count as \"still exists\". Omitting any of them once reported a stuck stack as gone. The same list is shared with step 6 so the two cannot disagree."],
+      ["REVIEW_IN_PROGRESS is excluded on purpose","The change-set-only stacks the CDK dry-run job creates on every MR sit in that state, and would be reported as failed teardowns."],
+      ["Known-issue diagnosis","For each failed stack it scans DELETE_FAILED events for the two upstream CDK <code>autoDeleteObjects</code> races — <code>GetBucketTagging</code> AccessDenied / <code>NoSuchTagSet</code>, and bucket-not-empty — and prints the exact remediation command for that specific bucket."],
+      ["Not a bug in this repo","The bucket policy granting the cleanup Lambda access already has a correct explicit <code>DependsOn</code>. It is a timing/propagation race on the AWS side; the script detects and guides through it rather than preventing it."]
+    ],
+    callout:`<strong>Re-running is the standard fix.</strong> If the failure is <code>DependencyViolation</code> on an AgentCore SG, or <code>ClusterContainsServicesException</code> on the VKG cluster, just run <code>make destroy-dev</code> again — steps 1–6 are idempotent and pick up where they left off.` }
+];
+
+/* Stacks: same graph as deploy, walked in reverse. */
+const STACKS = [
+  { id:"network", kind:"foundation", level:0, deps:[] },
+  { id:"auth", kind:"foundation", level:0, deps:[] },
+  { id:"guardrail", kind:"foundation", level:0, deps:[] },
+  { id:"authnz", kind:"foundation", level:0, deps:[] },
+  { id:"edge-waf", kind:"foundation", level:0, deps:[] },
+  { id:"storage", kind:"foundation", level:1, deps:[["network","VPC and subnets","prop"]] },
+  { id:"vkg", kind:"service", level:2, deps:[["network","VPC and Cloud Map namespace","prop"],["storage","ontology artifacts bucket","prop"]] },
+  { id:"namespace", kind:"service", level:3, deps:[["network","VPC, Lambda SG, Cloud Map namespace id","prop"],["authnz","roles tables","prop"],["vkg","cluster ARN","prop"],["storage","<code>/opensearch/endpoint</code> + collection name","explicit"]] },
+  { id:"serve", kind:"service", level:4, deps:[["network","VPC and security groups","prop"],["authnz","roles tables","prop"],["storage","Neptune, ontology and Athena buckets","prop"],["namespace","<code>/namespace/namespaces-table-name</code>","explicit"],["auth","issuer and client ids","explicit"]] },
+  { id:"sources", kind:"service", level:5, deps:[["network","VPC and security groups","prop"],["storage","Neptune and OpenSearch endpoints","explicit"],["namespace","namespace registry params","explicit"],["serve","<code>/serve/runtime-role-arn</code>","explicit"]] },
+  { id:"ontology", kind:"service", level:6, deps:[["network","VPC and Cloud Map namespace","prop"],["storage","Neptune and ontology bucket","prop"],["namespace","namespaces table, DZ project role","explicit"],["sources","<code>/sources/sources-table-name</code>","explicit"]] },
+  { id:"metric-service", kind:"service", level:6, deps:[["network","VPC and security groups","prop"],["storage","Neptune endpoint and ARN","prop"],["namespace","namespaces table, domain id, DZ project role","explicit"],["sources","<code>/sources/sources-table-name</code>","explicit"]] },
+  { id:"data-layer", kind:"service", level:7, deps:[["network","VPC and Lambda SG","prop"],["serve","<code>/serve/runtime-arn</code>","explicit"],["ontology","<code>/ontology-engine/api-fn-arn</code>","explicit"]] },
+  { id:"mcp", kind:"service", level:7, deps:[["network","VPC","prop"],["authnz","roles tables","prop"],["serve","runtime ARN","explicit"],["metric-service","<code>/metric/api-fn-arn</code>","explicit"],["ontology","<code>/ontology-engine/api-fn-arn</code>","explicit"],["auth","issuer and client ids","explicit"]] },
+  { id:"api", kind:"service", level:8, deps:[["network","VPC","prop"],["authnz","roles and cache-invalidation tables","prop"],["auth","issuer and client id","explicit"],["namespace","namespaces table for the authorizer","explicit"],["sources","sources and namespace function ARNs","explicit"],["metric-service","<code>/metric/api-fn-arn</code>","explicit"],["ontology","<code>/ontology-engine/api-fn-arn</code>","explicit"],["data-layer","<code>/data-layer/api-fn-arn</code>","explicit"]] },
+  { id:"web", kind:"service", level:9, deps:[["auth","Cognito mode and callback patch","explicit"],["api","API URL, id, stage","prop"],["serve","query endpoint for /ws","prop"],["edge-waf","CloudFront WebACL ARN","explicit"]] }
+];
+
+const STACK_NOTE = {
+  network: "<strong>Last stack to go.</strong> A leftover Cloud Map service (step 4) or ECS service (step 3) surfaces here, at the very end of the run.",
+  storage: "Neptune and OpenSearch Serverless go here — this is where the ~$930/month idle cost actually stops. Also the stack most likely to hit the <code>autoDeleteObjects</code> S3 race.",
+  serve:   "Its AgentCore Runtime was already deleted in step 1. By the time CDK reaches this stack there is no runtime left, only the surrounding ALB, Lambda and security group.",
+  mcp:     "Same as serve — the runtime went in step 1.",
+  vkg:     "The per-namespace ECS services were already deleted in step 3, so <code>DeleteCluster</code> can succeed here.",
+  namespace: "The DataZone domain and its retained children went in step 5. Retained resources mean CloudFormation has nothing to fail on."
+};
+
+/* ════════════════════════════════════════════════════════════════
+   DERIVED
+   ════════════════════════════════════════════════════════════════ */
+
+const byId = new Map(STACKS.map(s => [s.id, s]));
+const dependents = new Map(STACKS.map(s => [s.id, []]));
+STACKS.forEach(s => s.deps.forEach(([on]) => dependents.get(on).push(s.id)));
+
+const MAXL = Math.max(...STACKS.map(s => s.level));
+// Destroy order: highest level first. Within a level, order is CDK's choice.
+const DORDER = [...STACKS].sort((a, b) => b.level - a.level || STACKS.indexOf(a) - STACKS.indexOf(b));
+DORDER.forEach((s, i) => { s.dpos = i + 1; });
+// Rows top-to-bottom are L9 .. L0.
+const rows = Array.from({ length: MAXL + 1 }, (_, i) => STACKS.filter(s => s.level === MAXL - i));
+
+function ancestors(id, acc = new Set()) {            // things this stack needs -> go AFTER it
+  byId.get(id).deps.forEach(([on]) => { if (!acc.has(on)) { acc.add(on); ancestors(on, acc); } });
+  return acc;
+}
+function descendants(id, acc = new Set()) {          // things needing this stack -> go BEFORE it
+  dependents.get(id).forEach(d => { if (!acc.has(d)) { acc.add(d); descendants(d, acc); } });
+  return acc;
+}
+
+const KIND = { foundation: { label:"Foundation", color:"var(--foundation)", glyph:"dot" },
+               service:    { label:"Service",    color:"var(--service)",    glyph:"sq"  } };
+
+// Referenced by almost every stack — drawn faded so the chain stays readable.
+const AMBIENT = new Set(["network", "auth", "authnz"]);
+
+const OUTCOME = {
+  stop:  { label:"⨯ exits the script", color:"var(--critical)", cls:"stop" },
+  warn:  { label:"⚠ warns, continues", color:"var(--warning)",  cls:"warn" },
+  ok:    { label:"✓ clean exit",       color:"var(--good)",     cls:"ok"   },
+  plain: { label:"",                   color:"var(--axis)",     cls:""     }
+};
+
+// The unified walk: gates, steps 1-6, then every stack (inside step 7), then verify.
+const TIMELINE = [
+  ...STEPS.slice(0, 7).map(s => ({ type:"step", id:s.id })),
+  ...DORDER.map(s => ({ type:"stack", id:s.id })),
+  { type:"step", id:"verify" }
+];
+const stepById = new Map(STEPS.map(s => [s.id, s]));
+
+/* ════════════════════════════════════════════════════════════════
+   LAYOUT
+   ════════════════════════════════════════════════════════════════ */
+
+const PAD = 34, LANE = 92;
+const layouts = {};
+{
+  // Steps: one column.
+  const SW = 318, SH = 60, SG = 30, P = {};
+  STEPS.forEach((s, i) => { P[s.id] = { x: PAD + LANE, y: PAD + i * (SH + SG) }; });
+  layouts.steps = { pos:P, nw:SW, nh:SH, w: PAD*2 + LANE + SW + 150, h: PAD*2 + STEPS.length*(SH+SG) - SG, mode:"steps" };
+
+  // Stacks by level, L9 at top.
+  const NW = 164, NH = 50, HG = 22, VG = 40;
+  const widest = Math.max(...rows.map(r => r.length));
+  const rowW = widest*NW + (widest-1)*HG, L = {};
+  rows.forEach((row, i) => {
+    const w = row.length*NW + (row.length-1)*HG, x0 = PAD + LANE + (rowW - w)/2;
+    row.forEach((s, j) => { L[s.id] = { x: x0 + j*(NW+HG), y: PAD + i*(NH+VG) }; });
+  });
+  layouts.levels = { pos:L, nw:NW, nh:NH, w: PAD*2 + LANE + rowW, h: PAD*2 + rows.length*(NH+VG) - VG, mode:"levels" };
+
+  // Stacks as a strict sequence.
+  const OW = 240, RH = 36, O = {};
+  DORDER.forEach((s, i) => { O[s.id] = { x: PAD + LANE, y: PAD + i*RH }; });
+  layouts.seq = { pos:O, nw:OW, nh:28, w: PAD*2 + LANE + OW + 230, h: PAD*2 + DORDER.length*RH, mode:"seq" };
+}
+
+/* ════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════ */
+
+const state = { view:"steps", stackView:"levels", highlight:true, sel:null, step:-1, playing:null };
+const $ = id => document.getElementById(id);
+const svg = $("svg"), vp = $("viewport"), gB = $("bands"), gE = $("edges"), gN = $("nodes"), tip = $("tip");
+let cam = { x:0, y:0, k:1 };
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;" }[c]));
+const strip = s => String(s).replace(/<[^>]+>/g, "");
+const el = (n, a = {}) => { const e = document.createElementNS("http://www.w3.org/2000/svg", n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+const activeLayout = () => state.view === "steps" ? layouts.steps : layouts[state.stackView];
+
+/* ════════════════════════════════════════════════════════════════
+   RENDER
+   ════════════════════════════════════════════════════════════════ */
+
+function render() {
+  const L = activeLayout(), nw = L.nw, nh = L.nh;
+  gB.textContent = ""; gE.textContent = ""; gN.textContent = "";
+
+  if (L.mode === "steps") {
+    STEPS.forEach((s, i) => {
+      const p = L.pos[s.id];
+      const t = el("text", { class:"lvllabel", x: PAD + 8, y: p.y + nh/2 + 4 });
+      t.textContent = i === 0 ? "GATE" : (s.id === "verify" ? "CHECK" : String(i)); gB.appendChild(t);
+      if (i < STEPS.length - 1) {
+        const n = STEPS[i+1], q = L.pos[n.id];
+        gE.appendChild(el("path", { class:"edge", d:`M${p.x+nw/2},${p.y+nh} L${q.x+nw/2},${q.y}`,
+          "data-from":s.id, "data-to":n.id, "marker-end":"" }));
+      }
+    });
+    STEPS.forEach(s => {
+      const p = L.pos[s.id], o = OUTCOME[s.outcome];
+      const g = el("g", { class:"node", "data-kind":"step", "data-id":s.id, tabindex:"0", role:"button",
+        "aria-label":`${s.n}: ${s.t}${o.label ? ", " + strip(o.label) : ""}` });
+      g.appendChild(el("rect", { class:"body", x:p.x, y:p.y, width:nw, height:nh, rx:5 }));
+      g.appendChild(el("rect", { class:"accent", x:p.x, y:p.y, width:3, height:nh, rx:1.5, fill:o.color }));
+      g.appendChild(el("rect", { class:"pulse", x:p.x-3, y:p.y-3, width:nw+6, height:nh+6, rx:7 }));
+      const n1 = el("text", { class:"meta", x:p.x+14, y:p.y+17 }); n1.textContent = s.n.toUpperCase(); g.appendChild(n1);
+      const n2 = el("text", { class:"nm", x:p.x+14, y:p.y+36 }); n2.textContent = s.t; g.appendChild(n2);
+      if (o.label) {
+        const tg = el("text", { class:"tag", x:p.x+14, y:p.y+51, fill:o.color }); tg.textContent = o.label; g.appendChild(tg);
+      }
+      if (s.mins) {
+        const b = el("text", { class:"meta", x:p.x+nw-10, y:p.y+51, "text-anchor":"end" });
+        b.textContent = `waits up to ${s.mins}m`; g.appendChild(b);
+      }
+      gN.appendChild(g);
+    });
+  } else {
+    // Stack views
+    if (L.mode === "levels") {
+      rows.forEach((row, i) => {
+        const y = PAD + i*(nh+40), lvl = MAXL - i;
+        gB.appendChild(el("rect", { class:"lvlband", x:PAD, y:y-11, width:L.w-PAD*2, height:nh+22, rx:7, opacity: i%2 ? .55 : .25 }));
+        const t = el("text", { class:"lvllabel", x:PAD+10, y:y+nh/2-3 }); t.textContent = "L"+lvl; gB.appendChild(t);
+        const n = el("text", { class:"lvlnote", x:PAD+10, y:y+nh/2+11 });
+        n.textContent = row.length > 1 ? row.length + " together" : ""; gB.appendChild(n);
+      });
+    } else {
+      DORDER.forEach((s, i) => {
+        const p = L.pos[s.id];
+        if (i%2) gB.appendChild(el("rect", { class:"lvlband", x:PAD, y:p.y-3, width:L.w-PAD*2, height:nh+6, rx:5, opacity:.4 }));
+        const t = el("text", { class:"lvllabel", x:PAD+10, y:p.y+nh/2+4 }); t.textContent = String(i+1).padStart(2,"0"); gB.appendChild(t);
+      });
+    }
+    // Edges point in DESTROY direction: dependent -> dependency.
+    STACKS.forEach(s => {
+      const f = L.pos[s.id];
+      s.deps.forEach(([on]) => {
+        const t = L.pos[on];
+        let d;
+        if (L.mode === "levels") {
+          const x1 = f.x+nw/2, y1 = f.y+nh, x2 = t.x+nw/2, y2 = t.y;
+          const m = Math.max(18, (y2-y1)/2);
+          d = `M${x1},${y1} C${x1},${y1+m} ${x2},${y2-m} ${x2},${y2}`;
+        } else {
+          const gap = Math.abs(DORDER.indexOf(s) - DORDER.indexOf(byId.get(on)));
+          const k = 24 + gap*13;
+          const x1 = f.x+nw, y1 = f.y+nh/2, x2 = t.x+nw, y2 = t.y+nh/2;
+          d = `M${x1},${y1} C${x1+k},${y1} ${x2+k},${y2} ${x2},${y2}`;
+        }
+        gE.appendChild(el("path", { class:"edge" + (AMBIENT.has(on) ? " ambient" : ""), d, "data-from":s.id, "data-to":on }));
+      });
+    });
+    STACKS.forEach(s => {
+      const p = L.pos[s.id], k = KIND[s.kind];
+      const g = el("g", { class:"node", "data-kind":"stack", "data-id":s.id, tabindex:"0", role:"button",
+        "aria-label":`${s.id} stack, ${k.label}, level ${s.level}, destroy position ${s.dpos} of ${DORDER.length}` });
+      g.appendChild(el("rect", { class:"body", x:p.x, y:p.y, width:nw, height:nh, rx:5 }));
+      g.appendChild(el("rect", { class:"accent", x:p.x, y:p.y, width:3, height:nh, rx:1.5, fill:k.color }));
+      g.appendChild(el("rect", { class:"pulse", x:p.x-3, y:p.y-3, width:nw+6, height:nh+6, rx:7 }));
+      const cy = L.mode === "levels" ? p.y+19 : p.y+nh/2;
+      if (k.glyph === "dot") g.appendChild(el("circle", { cx:p.x+17, cy, r:4, fill:k.color }));
+      else g.appendChild(el("rect", { x:p.x+13, y:cy-4, width:8, height:8, rx:1, fill:k.color }));
+      const nm = el("text", { class:"nm", x:p.x+29, y: L.mode === "levels" ? p.y+23 : p.y+nh/2+4 });
+      nm.textContent = s.id; g.appendChild(nm);
+      if (L.mode === "levels") {
+        const m = el("text", { class:"meta", x:p.x+13, y:p.y+39 });
+        m.textContent = `L${s.level} · destroyed ${s.dpos}${STACK_NOTE[s.id] ? " ·" : ""}`; g.appendChild(m);
+      } else {
+        const m = el("text", { class:"meta", x:p.x+nw-8, y:p.y+nh/2+4, "text-anchor":"end" });
+        m.textContent = `L${s.level}`; g.appendChild(m);
+      }
+      gN.appendChild(g);
+    });
+  }
+
+  svg.setAttribute("viewBox", `0 0 ${L.w} ${L.h}`);
+  paint();
+}
+
+function paint() {
+  const inStacks = state.view !== "steps";
+  const sel = state.sel && state.sel.type === (inStacks ? "stack" : "step") ? state.sel.id : null;
+  const before = inStacks && sel && state.highlight ? descendants(sel) : null;   // destroyed BEFORE sel
+  const after  = inStacks && sel && state.highlight ? ancestors(sel)   : null;   // destroyed AFTER sel
+  const stepping = state.step >= 0;
+  const cur = stepping ? TIMELINE[state.step] : null;
+  const seen = new Set(TIMELINE.slice(0, Math.max(0, state.step)).map(t => t.type + ":" + t.id));
+
+  gN.querySelectorAll("g.node").forEach(g => {
+    const id = g.dataset.id, kind = g.dataset.kind;
+    g.classList.remove("dim", "sel", "pending", "active", "done");
+    if (id === sel) g.classList.add("sel");
+    if (before && id !== sel && !before.has(id) && !after.has(id)) g.classList.add("dim");
+    if (stepping) {
+      const key = kind + ":" + id;
+      // While walking the stacks, step 7 counts as in-progress, not pending.
+      if (cur && cur.type === "stack" && kind === "step" && id === "s7") g.classList.add("active");
+      else if (cur && cur.type === "step" && cur.id === id && cur.type === kind) g.classList.add("active");
+      else if (cur && cur.type === "stack" && cur.id === id && kind === "stack") g.classList.add("active");
+      else if (seen.has(key)) g.classList.add("done");
+      else g.classList.add("pending");
+    }
+  });
+
+  gE.querySelectorAll(".edge").forEach(p => {
+    p.classList.remove("hl", "hl-down", "dim");
+    if (!before) return;
+    const { from, to } = p.dataset;
+    const b = (to === sel && before.has(from)) || (before.has(to) && before.has(from));
+    const a = (from === sel && after.has(to)) || (after.has(from) && after.has(to));
+    if (b) p.classList.add("hl"); else if (a) p.classList.add("hl-down"); else p.classList.add("dim");
+  });
+
+  if (stepping) {
+    const n = cur.type === "step" ? stepById.get(cur.id).n + " — " + stepById.get(cur.id).t
+                                  : "step 7 · destroying " + cur.id;
+    $("s-read").textContent = `${state.step + 1} / ${TIMELINE.length} — ${n}`;
+  } else $("s-read").textContent = "not started";
+  $("s-prev").disabled = state.step <= 0;
+  $("s-next").disabled = state.step >= TIMELINE.length - 1;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   PANEL
+   ════════════════════════════════════════════════════════════════ */
+
+function glyph(id) {
+  const k = KIND[byId.get(id).kind];
+  return k.glyph === "dot" ? `<span class="dot" style="background:${k.color}"></span>`
+                           : `<span class="sq" style="background:${k.color}"></span>`;
+}
+
+function showStep(id) {
+  const s = stepById.get(id), o = OUTCOME[s.outcome];
+  $("panel").innerHTML = `
+    <h2>${s.n} — ${esc(s.t)}</h2>
+    <div class="kindrow">
+      ${o.label ? `<span class="badge ${o.cls}">${o.label}</span>` : ""}
+      ${s.budget ? `<span class="badge">${s.mins} min budget</span>` : ""}
+      ${id !== "verify" && id !== "s7" ? `<span class="badge ok">↻ idempotent</span>` : ""}
+    </div>
+    <p>${s.body}</p>
+    <dl class="kv">
+      <dt>Deletes</dt><dd>${s.deletes}</dd>
+      ${s.budget ? `<dt>Override</dt><dd><code>${s.budget}</code></dd>` : ""}
+    </dl>
+    ${s.whycfn ? `<h3>Why CloudFormation can't</h3><p>${s.whycfn}</p>` : ""}
+    <h3>Detail</h3>
+    <ul class="deps">${s.items.map(([t, d]) => `<li><span class="dn">${t}</span><span class="dw">${d}</span></li>`).join("")}</ul>
+    ${s.callout ? `<div class="callout ${s.outcome === "stop" ? "crit" : s.outcome === "ok" ? "ok" : ""}">${s.callout}</div>` : ""}`;
+}
+
+function showStack(id) {
+  const s = byId.get(id), k = KIND[s.kind];
+  const before = descendants(id), after = ancestors(id);
+  const dn = dependents.get(id);
+  $("panel").innerHTML = `
+    <h2>coa-dev-${esc(s.id)}</h2>
+    <div class="kindrow">
+      <span class="badge">${glyph(id)}${k.label}</span>
+      <span class="badge">Level ${s.level}</span>
+      ${s.id === "edge-waf" ? '<span class="badge">us-east-1</span>' : ""}
+    </div>
+    <dl class="kv">
+      <dt>Destroy position</dt><dd>${s.dpos} of ${DORDER.length}</dd>
+      <dt>Deploy position</dt><dd>${DORDER.length - s.dpos + 1} of ${DORDER.length}</dd>
+      <dt>Must go before it</dt><dd>${before.size} stack${before.size === 1 ? "" : "s"}</dd>
+      <dt>Can only go after</dt><dd>${after.size} stack${after.size === 1 ? "" : "s"}</dd>
+    </dl>
+    ${STACK_NOTE[id] ? `<div class="callout">${STACK_NOTE[id]}</div>` : ""}
+    <h3>Blocked by — ${dn.length} must be destroyed first</h3>
+    ${dn.length ? `<ul class="deps">${dn.map(d => {
+        const e = byId.get(d).deps.find(x => x[0] === id);
+        return `<li><span class="dn">${glyph(d)}<button class="jump" data-jump="${d}">${d}</button></span>
+          <span class="via">${e[2]}</span><span class="dw">holds ${e[1]}</span></li>`;
+      }).join("")}</ul>`
+      : `<p class="empty">Nothing. This stack can be destroyed first.</p>`}
+    <h3>Frees — ${s.deps.length} can go once this is gone</h3>
+    ${s.deps.length ? `<ul class="deps">${s.deps.map(([on, why, via]) =>
+        `<li><span class="dn">${glyph(on)}<button class="jump" data-jump="${on}">${on}</button></span>
+         <span class="via">${via}</span><span class="dw">this stack holds ${why}</span></li>`).join("")}</ul>`
+      : `<p class="empty">Nothing. This stack holds no references into others.</p>`}`;
+  $("panel").querySelectorAll("[data-jump]").forEach(b =>
+    b.addEventListener("click", () => selectStack(b.dataset.jump)));
+}
+
+function showIntro() {
+  $("panel").innerHTML = `
+    <h2>Pick anything</h2>
+    <p>Click a step for what it deletes, why CloudFormation can't, and what happens when its
+       wait budget runs out. Switch to <strong>Reverse order</strong> for step 7's graph.</p>
+    <h3>The shape of a teardown</h3>
+    <ul class="deps">
+      <li><span class="dn"><span class="dot" style="background:var(--critical)"></span>Two steps exit rather than continue</span>
+        <span class="dw">Step 2 (AgentCore ENIs still attached) and step 3 (a failing <code>delete-service</code> call).
+        Continuing would reach a guaranteed failure inside <code>cdk destroy</code> much later in the run.</span></li>
+      <li><span class="dn"><span class="dot" style="background:var(--warning)"></span>Three steps warn and continue</span>
+        <span class="dw">Steps 4, 5 and 6 on timeout. <code>cdk destroy</code> may still succeed; if it doesn't,
+        the step-7 verification is where the leftover surfaces.</span></li>
+      <li><span class="dn"><span class="dot" style="background:var(--good)"></span>Steps 1–6 are idempotent</span>
+        <span class="dw">Re-running <code>make destroy-dev</code> after any stop or warning picks up from
+        an already-deleted or in-progress state. That is the standard fix, not a workaround.</span></li>
+    </ul>
+    <div class="callout"><strong>Ordering is not hand-rolled.</strong> For the 16 CFN-owned stacks,
+      CDK walks the same <code>addDependency()</code> graph as deploy, backwards. The script only
+      orders the things CloudFormation has no record of.</div>`;
+}
+
+function selectStack(id) {
+  if (state.view === "steps") { setView("stacks"); }
+  state.sel = { type:"stack", id }; showStack(id); paint();
+}
+function selectStep(id) { state.sel = { type:"step", id }; showStep(id); paint(); }
+
+/* ════════════════════════════════════════════════════════════════
+   INTERACTION
+   ════════════════════════════════════════════════════════════════ */
+
+function nodeAt(e) { return e.target.closest("g.node"); }
+function pick(g) { g.dataset.kind === "step" ? selectStep(g.dataset.id) : selectStack(g.dataset.id); }
+gN.addEventListener("click", e => { const g = nodeAt(e); if (g) pick(g); });
+gN.addEventListener("focusin", e => { const g = nodeAt(e); if (g) pick(g); });
+gN.addEventListener("keydown", e => {
+  const g = nodeAt(e); if (!g) return;
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(g); }
+});
+gN.addEventListener("mousemove", e => {
+  const g = nodeAt(e);
+  if (!g) { tip.style.opacity = 0; return; }
+  if (g.dataset.kind === "step") {
+    const s = stepById.get(g.dataset.id), o = OUTCOME[s.outcome];
+    tip.innerHTML = `<strong>${s.n} — ${esc(s.t)}</strong><span>${strip(s.deletes)}${
+      s.budget ? `<br>waits up to ${s.mins} min · ${strip(o.label)}` : (o.label ? "<br>" + strip(o.label) : "")}</span>`;
+  } else {
+    const s = byId.get(g.dataset.id);
+    tip.innerHTML = `<strong>coa-dev-${esc(s.id)}</strong><span>${KIND[s.kind].label} · L${s.level}<br>
+      destroyed ${s.dpos} of ${DORDER.length} · ${descendants(s.id).size} must go first</span>`;
+  }
+  tip.style.opacity = 1;
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - r.width - 10) + "px";
+  tip.style.top = Math.min(e.clientY + 14, innerHeight - r.height - 10) + "px";
+});
+gN.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
+
+let drag = null;
+svg.addEventListener("pointerdown", e => {
+  if (nodeAt(e)) return;
+  drag = { x:e.clientX, y:e.clientY, cx:cam.x, cy:cam.y };
+  svg.classList.add("dragging"); svg.setPointerCapture(e.pointerId);
+});
+svg.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const sc = activeLayout().w / svg.clientWidth;
+  cam.x = drag.cx + (e.clientX - drag.x) * sc;
+  cam.y = drag.cy + (e.clientY - drag.y) * sc;
+  applyCam();
+});
+svg.addEventListener("pointerup", e => { drag = null; svg.classList.remove("dragging"); svg.releasePointerCapture(e.pointerId); });
+svg.addEventListener("wheel", e => { e.preventDefault(); zoom(e.deltaY < 0 ? 1.12 : 1/1.12); }, { passive:false });
+function applyCam() { vp.setAttribute("transform", `translate(${cam.x} ${cam.y}) scale(${cam.k})`); }
+function zoom(f) { cam.k = Math.min(3, Math.max(.3, cam.k * f)); applyCam(); }
+function fit() { cam = { x:0, y:0, k:1 }; applyCam(); }
+$("z-in").onclick = () => zoom(1.2);
+$("z-out").onclick = () => zoom(1/1.2);
+$("z-fit").onclick = fit;
+
+const HEADS = {
+  steps:  ["Steps 0–7 — scripts/destroy.sh", "Top to bottom. Steps 1–6 delete what CloudFormation cannot; step 7 is the only CDK call."],
+  levels: ["Step 7 — cdk destroy --all, by level", "L9 at the top goes first, L0 last. Edges point the way CloudFormation must delete: a stack can only go once everything holding a reference into it is gone."],
+  seq:    ["Step 7 — cdk destroy --all, in sequence", "One valid reverse topological order, top to bottom. One stack at a time — no concurrency flag here either."]
+};
+function setHead() {
+  const key = state.view === "steps" ? "steps" : state.stackView;
+  $("g-title").textContent = HEADS[key][0];
+  $("g-sub").textContent = HEADS[key][1];
+}
+function setView(v) {
+  state.view = v;
+  $("v-steps").setAttribute("aria-pressed", v === "steps");
+  $("v-stacks").setAttribute("aria-pressed", v === "stacks");
+  setHead(); fit(); render();
+}
+$("v-steps").onclick = () => setView("steps");
+$("v-stacks").onclick = () => setView("stacks");
+$("o-levels").onclick = () => { state.stackView = "levels"; $("o-levels").setAttribute("aria-pressed", true); $("o-seq").setAttribute("aria-pressed", false); if (state.view === "stacks") { setHead(); fit(); render(); } };
+$("o-seq").onclick = () => { state.stackView = "seq"; $("o-seq").setAttribute("aria-pressed", true); $("o-levels").setAttribute("aria-pressed", false); if (state.view === "stacks") { setHead(); fit(); render(); } };
+$("h-on").onclick = () => { state.highlight = true; $("h-on").setAttribute("aria-pressed", true); $("h-off").setAttribute("aria-pressed", false); paint(); };
+$("h-off").onclick = () => { state.highlight = false; $("h-off").setAttribute("aria-pressed", true); $("h-on").setAttribute("aria-pressed", false); paint(); };
+
+// Walk
+function stop() { if (state.playing) { clearInterval(state.playing); state.playing = null; $("s-play").textContent = "▶ Play"; } }
+function goto(i) {
+  state.step = Math.max(0, Math.min(TIMELINE.length - 1, i));
+  const t = TIMELINE[state.step];
+  // Auto-follow the walk across the view boundary.
+  if (t.type === "stack" && state.view !== "stacks") setView("stacks");
+  if (t.type === "step" && state.view !== "steps") setView("steps");
+  if (t.type === "stack") selectStack(t.id); else selectStep(t.id);
+}
+$("s-next").onclick = () => { stop(); goto(state.step + 1); };
+$("s-prev").onclick = () => { stop(); goto(state.step - 1); };
+$("s-reset").onclick = () => { stop(); state.step = -1; state.sel = null; showIntro(); paint(); };
+$("s-play").onclick = () => {
+  if (state.playing) return stop();
+  if (state.step >= TIMELINE.length - 1) state.step = -1;
+  $("s-play").textContent = "❚❚ Pause";
+  state.playing = setInterval(() => {
+    if (state.step >= TIMELINE.length - 1) return stop();
+    goto(state.step + 1);
+  }, 850);
+  goto(state.step + 1);
+};
+
+// Tabs
+const TABS = [["t-graph","p-graph"], ["t-risk","p-risk"], ["t-table","p-table"]];
+TABS.forEach(([t, p]) => $(t).onclick = () => {
+  stop();
+  TABS.forEach(([t2, p2]) => {
+    const on = t2 === t;
+    $(t2).setAttribute("aria-selected", on); $(t2).setAttribute("aria-pressed", on); $(p2).hidden = !on;
+  });
+});
+
+$("theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  document.documentElement.setAttribute("data-theme",
+    cur === "dark" ? "light" : cur === "light" ? "dark"
+      : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark"));
+};
+
+/* ════════════════════════════════════════════════════════════════
+   STATIC BUILDS
+   ════════════════════════════════════════════════════════════════ */
+
+$("legend").innerHTML = `
+  <span class="lg"><span class="dot" style="background:var(--critical)"></span>⨯ Exits the script on timeout</span>
+  <span class="lg"><span class="dot" style="background:var(--warning)"></span>⚠ Warns and continues</span>
+  <span class="lg"><span class="dot" style="background:var(--good)"></span>✓ Clean exit</span>
+  <span class="lg"><span class="dot" style="background:var(--foundation)"></span>Foundation stack</span>
+  <span class="lg"><span class="sq" style="background:var(--service)"></span>Service stack</span>
+  <span class="lg"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--critical)" stroke-width="2"/></svg>Must be destroyed first</span>
+  <span class="lg"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--foundation)" stroke-width="2"/></svg>Freed by this one</span>
+  <span class="lg"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--axis)" stroke-width="2" opacity=".16"/></svg>network / auth / authnz — faded, referenced by nearly everything</span>`;
+
+const ONSTOP = { stop:"Exits 1", warn:"Warns, continues", ok:"—", plain:"—" };
+$("tvsteps").querySelector("tbody").innerHTML = STEPS.map((s, i) => `
+  <tr>
+    <td class="num">${i === 0 ? "0" : (s.id === "verify" ? "✓" : i)}</td>
+    <td><strong>${esc(s.t)}</strong></td>
+    <td>${strip(s.deletes)}</td>
+    <td>${s.whycfn ? strip(s.whycfn) : '<span style="color:var(--ink-muted)">n/a</span>'}</td>
+    <td class="num">${s.budget ? `${s.mins} min<br><span style="color:var(--ink-muted);font-size:11px">${s.budget}</span>` : '<span style="color:var(--ink-muted)">—</span>'}</td>
+    <td class="onstop" style="color:${s.outcome === "stop" ? "var(--critical)" : "var(--ink-1)"}">${ONSTOP[s.outcome]}</td>
+  </tr>`).join("");
+
+$("tvstacks").querySelector("tbody").innerHTML = DORDER.map(s => `
+  <tr>
+    <td class="num">${s.dpos}</td>
+    <td><strong>coa-dev-${esc(s.id)}</strong></td>
+    <td class="num">L${s.level}</td>
+    <td>${dependents.get(s.id).length
+      ? dependents.get(s.id).map(d => `${d} <span class="via">${byId.get(d).deps.find(x => x[0] === s.id)[2]}</span>`).join(", ")
+      : '<span style="color:var(--ink-muted)">— can go first</span>'}</td>
+  </tr>`).join("");
+
+(function budgets() {
+  const c = $("budgets"), W = 760, H = 250, M = { t:10, r:120, b:34, l:152 };
+  const data = STEPS.filter(s => s.budget).map(s => ({ t:s.t, m:s.mins, o:s.outcome, v:s.budget }))
+                    .sort((a, b) => b.m - a.m);
+  const maxX = 30, pw = W - M.l - M.r, ph = H - M.t - M.b;
+  const rh = ph / data.length, bh = Math.min(26, rh - 10);
+  const x = v => M.l + (v / maxX) * pw;
+  let s = "";
+  for (let v = 0; v <= 30; v += 10) {
+    s += `<line class="${v === 0 ? "axis-line" : "grid-line"}" x1="${x(v)}" y1="${M.t}" x2="${x(v)}" y2="${M.t + ph}"/>
+          <text class="axis-txt" x="${x(v)}" y="${M.t + ph + 18}" text-anchor="middle">${v}</text>`;
+  }
+  data.forEach((d, i) => {
+    const y = M.t + i * rh + (rh - bh) / 2;
+    const col = d.o === "stop" ? "var(--critical)" : "var(--warning)";
+    s += `<rect x="${M.l}" y="${y}" width="${Math.max(2, x(d.m) - M.l)}" height="${bh}" rx="4" fill="${col}">
+            <title>${d.t}: ${d.m} min (${d.v})</title></rect>
+          <text class="axis-txt" x="${M.l - 10}" y="${y + bh/2 + 4}" text-anchor="end" style="fill:var(--ink-1)">${d.t.replace(/^(Delete|Wait for|Force-delete) (the )?/, "")}</text>
+          <text class="barlbl" x="${x(d.m) + 8}" y="${y + bh/2 + 4}">${d.m}m ${d.o === "stop" ? "⨯ exits" : "⚠ warns"}</text>`;
+  });
+  s += `<text class="axis-txt" x="${M.l + pw/2}" y="${H - 4}" text-anchor="middle">default wait budget (minutes)</text>`;
+  c.innerHTML = s;
+})();
+
+setHead();
+render();
+showIntro();
+</script>
+</body>
+</html>

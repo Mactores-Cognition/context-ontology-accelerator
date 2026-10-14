@@ -1,0 +1,103 @@
+%% COA teardown flow — `make destroy-dev`
+%% Source of truth: scripts/destroy.sh (7 steps). infra/README.md's teardown
+%% section is STALE: it documents 5 steps and claims the ENI wait is disabled.
+%% Steps 1-6 exist because CloudFormation does NOT own these resources.
+%% Steps 1-6 are idempotent — re-run the script after any stop or warning.
+
+flowchart TD
+
+  START["make destroy-dev - scripts/destroy.sh dev"]
+
+  subgraph PH0["PHASE 0 — Gates"]
+    direction TB
+    V1["Validate ENV, SCL_PREFIX, SCL_PROJECT_TAG charsets"]
+    V2["aws sts get-caller-identity - HARD GATE, exit if no credentials"]
+    V3{"Interactive and SCL_DESTROY_YES not 1?"}
+    V4["Prompt: type yes to destroy coa-dev-* in region"]
+    ABORT["Aborted - exit 1"]
+    V1 --> V2 --> V3
+    V3 -->|yes| V4
+    V4 -->|"anything else"| ABORT
+  end
+
+  START --> V1
+
+  subgraph PH1["PHASE 1 — Resources CFN does not own (steps 1-6)"]
+    direction TB
+
+    S1["STEP 1 - Delete AgentCore Runtimes - read /serve/runtime-arn and /mcp/runtime-arn from SSM, capture their SGs FIRST, then delete-agent-runtime. Starts the ENI-detach clock as early as possible"]
+
+    S2["STEP 2 - Wait for AgentCore ENIs to detach - poll describe-network-interfaces every 15s, budget SCL_ENI_WAIT_MAX_SECONDS default 600"]
+    S2G{"All ENIs detached?"}
+    S2STOP["HARD STOP - exit 1. Known AgentCore behaviour, detach can take hours. Do NOT run cdk destroy: DeleteSecurityGroup would fail DependencyViolation. Re-run later, steps 1-6 resume"]
+
+    S3["STEP 3 - Delete VKG ECS services - created outside CFN by the reload Lambda on ontology.published. Scale to 0, delete --force, wait INACTIVE up to 300s. Else DeleteCluster fails ClusterContainsServicesException"]
+    S3G{"delete-service API call failed?"}
+    S3STOP["HARD STOP - exit 1. Services still active and could not be deleted"]
+
+    S4["STEP 4 - Delete Cloud Map services - CFN owns the private DNS namespace, NOT the services inside it. Deregister instances, then delete-service with retry up to 180s. Else DeleteNamespace leaves network stack DELETE_FAILED"]
+
+    S5["STEP 5 - Force-delete DataZone domain - delete-domain --skip-deletion-check cascades to every project, asset and asset type. CFN cannot: a shared asset type referenced by other namespaces' projects stalls the system project, then ProjectProfile, then the domain. Children are RemovalPolicy.RETAIN so CFN never tries. Wait up to 300s"]
+
+    S6["STEP 6 - Delete connector stacks - separate CDK apps in connectors/, so cdk destroy --all never sees them. CFN delete-stack on coa-dev-*-coa-connector, wait up to 1800s - the VPC-attached Databricks connector needs ~20 min for Lambda to release ENIs"]
+
+    S1 --> S2 --> S2G
+    S2G -->|no| S2STOP
+    S2G -->|yes| S3
+    S3 --> S3G
+    S3G -->|yes| S3STOP
+    S3G -->|no| S4
+    S4 --> S5 --> S5N["Timeouts in steps 4, 5, 6 WARN and continue - the step-7 verification is where leftovers surface"]
+    S5N --> S6
+  end
+
+  %% Declared after PH1 so S1 is placed in PH1, not pulled into PH0.
+  V3 -->|no| S1
+  V4 -->|"typed yes"| S1
+
+  subgraph PH2["PHASE 2 — STEP 7: cdk destroy --all (sequential, reverse of the deploy graph)"]
+    direction TB
+    R9["coa-dev-web"]
+    R8["coa-dev-api"]
+    R7["coa-dev-mcp + coa-dev-data-layer"]
+    R6["coa-dev-metric-service + coa-dev-ontology"]
+    R5["coa-dev-sources"]
+    R4["coa-dev-serve"]
+    R3["coa-dev-namespace"]
+    R2["coa-dev-vkg"]
+    R1["coa-dev-storage - Neptune and OpenSearch Serverless go here, this is where the ~930 USD/mo idle cost stops"]
+    R0["coa-dev-network + auth + guardrail + authnz + edge-waf"]
+    R9 --> R8 --> R7 --> R6 --> R5 --> R4 --> R3 --> R2 --> R1 --> R0
+  end
+
+  S6 --> R9
+
+  subgraph PH3["PHASE 3 — Post-destroy verification"]
+    direction TB
+    VER["list-stacks for coa-dev-* in any live status, including CREATE_FAILED, DELETE_FAILED, ROLLBACK_FAILED"]
+    VERG{"Any stacks remain?"}
+    CLEAN["All coa-dev-* deleted cleanly - exit 0"]
+    DIAG["Scan each failed stack's DELETE_FAILED events for the two known upstream CDK S3 autoDeleteObjects races - GetBucketTagging AccessDenied / NoSuchTagSet, and bucket-not-empty - and print the exact fix command. Exit 1"]
+    MANUAL["Not covered: a connector deployed with a custom FUNCTION_NAME_PREFIX must be destroyed by hand"]
+    VER --> VERG
+    VERG -->|no| CLEAN
+    VERG -->|yes| DIAG
+    DIAG -.-> MANUAL
+  end
+
+  R0 --> VER
+
+  classDef gate fill:#FFF4E5,stroke:#B35C00,color:#3D2200
+  classDef manual fill:#F5F0FF,stroke:#6D28D9,color:#2E1065
+  classDef stop fill:#FDECEC,stroke:#B42318,color:#4A0F0C
+  classDef stack fill:#E8F5F0,stroke:#0F766E,color:#042F2A
+  classDef note fill:#FAFAF8,stroke:#9A9A93,color:#3F3F3A
+  classDef good fill:#E7F5EC,stroke:#15803D,color:#052E16
+
+  class START,V1,V2,V3,V4 gate
+  class S1,S2,S3,S4,S5,S6 manual
+  class S2STOP,S3STOP,ABORT,DIAG stop
+  class R0,R1,R2,R3,R4,R5,R6,R7,R8,R9 stack
+  class S2G,S3G,VERG gate
+  class VER,S5N,MANUAL note
+  class CLEAN good

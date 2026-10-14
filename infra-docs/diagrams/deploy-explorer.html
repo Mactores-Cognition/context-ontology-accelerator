@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>COA deploy flow explorer</title>
+<!--
+  Interactive companion to deploy-flow.mmd.
+  Self-contained: no build, no network, no dependencies. Open in any browser.
+
+  Data is a hand-authored snapshot of:
+    infra/bin/app.ts          every addDependency() and prop-derived reference
+    scripts/deploy.sh         phase order, cdk flags
+    scripts/preflight-deploy.sh   the 9 gates
+    Makefile                  deploy-dev target chaining
+  Re-check STACKS below when app.ts changes.
+
+  Colours: dataviz reference palette, categorical slots 1-3 + status tokens.
+  Validated all-pairs in both modes (worst CVD dE 9.2 light / 9.4 dark).
+  Kind is also encoded by glyph and accent, never by colour alone.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --plane: #f9f9f7;
+    --surface-2: #f2f1ed;
+    --ink-1: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-muted: #898781;
+    --hair: #e1e0d9;
+    --axis: #c3c2b7;
+    --ring: rgba(11, 11, 11, 0.10);
+    --foundation: #2a78d6;
+    --service: #eb6834;
+    --external: #1baf7a;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --shadow: 0 1px 2px rgba(11,11,11,.05), 0 8px 24px rgba(11,11,11,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --plane: #0d0d0d;
+      --surface-2: #232321;
+      --ink-1: #f0efec;
+      --ink-2: #c3c2b7;
+      --ink-muted: #898781;
+      --hair: #2c2c2a;
+      --axis: #383835;
+      --ring: rgba(255, 255, 255, 0.10);
+      --foundation: #3987e5;
+      --service: #d95926;
+      --external: #199e70;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --plane: #0d0d0d;
+    --surface-2: #232321;
+    --ink-1: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-muted: #898781;
+    --hair: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10);
+    --foundation: #3987e5;
+    --service: #d95926;
+    --external: #199e70;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.45);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--plane);
+    color: var(--ink-1);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: var(--foundation); }
+
+  header.top {
+    display: flex; align-items: flex-start; gap: 20px;
+    padding: 22px 24px 16px; border-bottom: 1px solid var(--hair);
+    background: var(--surface-1);
+  }
+  header.top h1 { margin: 0 0 4px; font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+  header.top p { margin: 0; color: var(--ink-2); font-size: 13px; max-width: 72ch; }
+  header.top code { font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 3px; }
+  .spacer { flex: 1; }
+
+  /* ── one control row above everything it scopes ───────────── */
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+    padding: 12px 24px; border-bottom: 1px solid var(--hair);
+    background: var(--surface-1); position: sticky; top: 0; z-index: 20;
+  }
+  .ctl-group { display: flex; align-items: center; gap: 8px; }
+  .ctl-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+  .seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    appearance: none; border: 0; background: transparent; color: var(--ink-2);
+    font: inherit; font-size: 13px; padding: 7px 13px; cursor: pointer; min-height: 34px;
+  }
+  .seg button + button { border-left: 1px solid var(--axis); }
+  .seg button[aria-pressed="true"] { background: var(--ink-1); color: var(--surface-1); font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--foundation); outline-offset: -2px; }
+  .btn {
+    appearance: none; background: var(--surface-1); color: var(--ink-1);
+    border: 1px solid var(--axis); border-radius: 6px; font: inherit; font-size: 13px;
+    padding: 7px 12px; cursor: pointer; min-height: 34px; min-width: 34px;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn:focus-visible { outline: 2px solid var(--foundation); outline-offset: 1px; }
+  .btn[disabled] { opacity: .4; cursor: default; }
+  .btn.primary { background: var(--ink-1); color: var(--surface-1); border-color: var(--ink-1); font-weight: 600; }
+  .stepreadout { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; min-width: 15ch; }
+
+  /* ── layout ───────────────────────────────────────────────── */
+  .wrap { display: grid; grid-template-columns: minmax(0,1fr) 352px; gap: 0; align-items: start; }
+  @media (max-width: 1080px) { .wrap { grid-template-columns: 1fr; } }
+
+  .stage { padding: 18px 10px 10px 24px; min-width: 0; }
+  .panel {
+    border-left: 1px solid var(--hair); background: var(--surface-1);
+    padding: 18px 22px 28px; min-height: 70vh; position: sticky; top: 59px;
+    max-height: calc(100vh - 59px); overflow-y: auto;
+  }
+
+  /* ── phase strip ──────────────────────────────────────────── */
+  .phases { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .phase {
+    appearance: none; text-align: left; font: inherit; cursor: pointer;
+    background: var(--surface-1); border: 1px solid var(--hair);
+    border-left: 3px solid var(--axis); border-radius: 5px;
+    padding: 8px 12px; min-height: 44px; flex: 1 1 170px;
+  }
+  .phase:hover { background: var(--surface-2); }
+  .phase:focus-visible { outline: 2px solid var(--foundation); outline-offset: 1px; }
+  .phase[aria-current="true"] { border-left-color: var(--ink-1); background: var(--surface-2); }
+  .phase .pn { display: block; font-size: 10.5px; font-weight: 700; letter-spacing: .07em; color: var(--ink-muted); }
+  .phase .pt { display: block; font-size: 13px; font-weight: 600; margin-top: 1px; }
+  .phase .ps { display: block; font-size: 11.5px; color: var(--ink-2); margin-top: 1px; }
+
+  /* ── graph ────────────────────────────────────────────────── */
+  .graphcard { background: var(--surface-1); border: 1px solid var(--hair); border-radius: 8px; box-shadow: var(--shadow); }
+  .graphhead { display: flex; align-items: baseline; gap: 10px; padding: 14px 18px 0; }
+  .graphhead h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  .graphhead .sub { font-size: 12px; color: var(--ink-2); }
+  .zoomrow { display: flex; gap: 6px; padding: 10px 18px 0; }
+  .zoomrow .btn { padding: 4px 9px; min-height: 28px; font-size: 12px; }
+  svg.graph { display: block; width: 100%; height: 640px; touch-action: none; cursor: grab; }
+  svg.graph.dragging { cursor: grabbing; }
+
+  .edge { fill: none; stroke: var(--axis); stroke-width: 1.25; }
+  .edge.hl { stroke: var(--foundation); stroke-width: 2; }
+  .edge.hl-down { stroke: var(--service); stroke-width: 2; }
+  .edge.dim { opacity: .12; }
+  /* network, auth and authnz feed almost every stack. At full strength their
+     edges bury the structural chain, so they recede until actually selected. */
+  .edge.ambient { opacity: .16; }
+  .edge.ambient.hl, .edge.ambient.hl-down { opacity: 1; }
+  .lvlband { fill: var(--surface-2); }
+  .lvllabel { fill: var(--ink-muted); font-size: 10.5px; font-weight: 700; letter-spacing: .07em; }
+  .lvlnote { fill: var(--ink-muted); font-size: 10.5px; }
+
+  g.node { cursor: pointer; }
+  g.node rect.body { fill: var(--surface-1); stroke: var(--ring); stroke-width: 1; }
+  g.node rect.accent { stroke: none; }
+  g.node text.nm { fill: var(--ink-1); font-size: 13px; font-weight: 600; }
+  g.node text.meta { fill: var(--ink-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  g.node:focus { outline: none; }
+  g.node:focus-visible rect.body, g.node.sel rect.body { stroke: var(--ink-1); stroke-width: 2; }
+  g.node.dim { opacity: .18; }
+  g.node.pending rect.body { fill: var(--surface-1); stroke-dasharray: 3 3; stroke: var(--axis); }
+  g.node.pending text.nm { fill: var(--ink-muted); }
+  g.node.active rect.body { stroke: var(--ink-1); stroke-width: 2; }
+  g.node.done rect.body { fill: var(--surface-2); }
+  .tick { font-size: 11px; font-weight: 700; }
+
+  @keyframes pulse { 0%,100% { opacity: .9; } 50% { opacity: .25; } }
+  /* Base rule is load-bearing: without it SVG's default fill:black paints a box behind every node. */
+  g.node rect.pulse { fill: none; stroke: none; }
+  g.node:not(.active) rect.pulse { display: none; }
+  g.node.active rect.pulse { stroke: var(--ink-1); stroke-width: 2; animation: pulse 1.3s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { g.node.active rect.pulse { animation: none; } }
+
+  /* ── legend ───────────────────────────────────────────────── */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 20px; padding: 12px 18px 16px; border-top: 1px solid var(--hair); margin-top: 8px; }
+  .lg { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-2); }
+  .lg svg { display: block; }
+
+  /* ── detail panel ─────────────────────────────────────────── */
+  .panel h2 { margin: 0 0 2px; font-size: 16px; font-weight: 650; word-break: break-word; }
+  .panel .kindrow { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650;
+    padding: 3px 8px; border-radius: 999px; border: 1px solid var(--ring); background: var(--surface-2); color: var(--ink-2);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .sq { width: 8px; height: 8px; flex: none; }
+  .di { width: 9px; height: 9px; flex: none; transform: rotate(45deg); }
+  .panel h3 {
+    margin: 18px 0 7px; font-size: 10.5px; font-weight: 700; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--ink-muted);
+  }
+  .panel p { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
+  .kv dt { color: var(--ink-muted); }
+  .kv dd { margin: 0; color: var(--ink-1); font-variant-numeric: tabular-nums; }
+  ul.deps { list-style: none; margin: 0; padding: 0; }
+  ul.deps li { padding: 7px 0; border-top: 1px solid var(--hair); font-size: 12.5px; }
+  ul.deps li:first-child { border-top: 0; }
+  ul.deps .dn { font-weight: 600; color: var(--ink-1); display: inline-flex; align-items: center; gap: 6px; }
+  ul.deps .dw { display: block; color: var(--ink-2); margin-top: 2px; }
+  ul.deps .via {
+    font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--ink-muted); border: 1px solid var(--hair); border-radius: 3px; padding: 0 4px; margin-left: 4px;
+  }
+  .jump { appearance: none; background: none; border: 0; padding: 0; font: inherit; color: var(--foundation); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .empty { color: var(--ink-muted); font-size: 12.5px; font-style: italic; }
+  .callout {
+    border-left: 3px solid var(--warning); background: var(--surface-2);
+    padding: 9px 12px; font-size: 12.5px; color: var(--ink-2); border-radius: 0 4px 4px 0; margin: 10px 0 0;
+  }
+  .callout.crit { border-left-color: var(--critical); }
+  .callout strong { color: var(--ink-1); }
+
+  /* ── tabs ─────────────────────────────────────────────────── */
+  [role="tabpanel"][hidden] { display: none; }
+
+  /* ── table view (the accessible twin) ─────────────────────── */
+  table.tv { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.tv caption { text-align: left; color: var(--ink-2); font-size: 12.5px; padding: 0 0 10px; }
+  table.tv th, table.tv td { text-align: left; vertical-align: top; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--hair); }
+  table.tv th { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); white-space: nowrap; }
+  table.tv td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.tv tbody tr:hover { background: var(--surface-2); }
+
+  /* ── waves chart ──────────────────────────────────────────── */
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 20px; }
+  .tile { flex: 1 1 150px; background: var(--surface-1); border: 1px solid var(--hair); border-radius: 8px; padding: 14px 16px; }
+  .tile .tv1 { font-size: 27px; font-weight: 650; letter-spacing: -.02em; line-height: 1.1; }
+  .tile .tl { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
+  .chartcard { background: var(--surface-1); border: 1px solid var(--hair); border-radius: 8px; padding: 16px 18px 10px; box-shadow: var(--shadow); }
+  .chartcard h3 { margin: 0 0 2px; font-size: 14px; font-weight: 650; letter-spacing: 0; text-transform: none; color: var(--ink-1); }
+  .chartcard .sub { font-size: 12px; color: var(--ink-2); margin: 0 0 14px; }
+  .grid-line { stroke: var(--hair); stroke-width: 1; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .axis-txt { fill: var(--ink-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .bar { fill: var(--foundation); }
+  .barlbl { fill: var(--ink-1); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .reflabel { fill: var(--ink-2); font-size: 11px; font-weight: 600; }
+  .refline { stroke: var(--critical); stroke-width: 2; }
+  .prose { max-width: 78ch; }
+  .prose p { font-size: 13px; color: var(--ink-2); }
+
+  .tooltip {
+    position: fixed; z-index: 90; pointer-events: none; opacity: 0;
+    background: var(--surface-1); color: var(--ink-1); border: 1px solid var(--ring);
+    box-shadow: var(--shadow); border-radius: 6px; padding: 8px 11px;
+    font-size: 12px; max-width: 290px; transition: opacity .09s;
+  }
+  .tooltip strong { display: block; font-size: 12.5px; margin-bottom: 2px; }
+  .tooltip span { color: var(--ink-2); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1>COA deploy flow — <code>make deploy-dev</code></h1>
+    <p>16 CDK stacks across 10 dependency levels. <strong>CDK deploys them one at a time</strong> —
+       <code>scripts/deploy.sh</code> runs <code>cdk deploy --all</code> with no <code>--concurrency</code> flag,
+       so the default of 1 applies. Click any stack for its dependencies and the reason for each.</p>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn" id="theme" aria-label="Toggle colour theme">◐ Theme</button>
+</header>
+
+<div class="controls">
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-view">View</span>
+    <div class="seg" role="group" aria-labelledby="lbl-view">
+      <button id="v-levels" aria-pressed="true">Levels</button>
+      <button id="v-order" aria-pressed="false">Deploy order</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-hl">Highlight</span>
+    <div class="seg" role="group" aria-labelledby="lbl-hl">
+      <button id="h-on" aria-pressed="true">Dependency paths</button>
+      <button id="h-off" aria-pressed="false">Off</button>
+    </div>
+  </div>
+  <div class="ctl-group">
+    <span class="ctl-label" id="lbl-step">Step through</span>
+    <button class="btn" id="s-prev" aria-label="Previous stack">◀</button>
+    <button class="btn primary" id="s-play">▶ Play</button>
+    <button class="btn" id="s-next" aria-label="Next stack">▶</button>
+    <button class="btn" id="s-reset">Reset</button>
+    <span class="stepreadout" id="s-read" role="status" aria-live="polite">not started</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="ctl-group">
+    <div class="seg" role="tablist" aria-label="Views">
+      <button role="tab" id="t-graph" aria-selected="true" aria-controls="p-graph" aria-pressed="true">Graph</button>
+      <button role="tab" id="t-waves" aria-selected="false" aria-controls="p-waves" aria-pressed="false">Parallelism</button>
+      <button role="tab" id="t-table" aria-selected="false" aria-controls="p-table" aria-pressed="false">Table</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ GRAPH ══════════════════════════════════════════════════ -->
+<div id="p-graph" role="tabpanel" aria-labelledby="t-graph">
+  <div class="wrap">
+    <div class="stage">
+
+      <div class="phases" id="phases"></div>
+
+      <div class="graphcard">
+        <div class="graphhead">
+          <h2 id="g-title">Phase 3 — cdk deploy --all</h2>
+          <span class="sub" id="g-sub">Rows are dependency levels. Every stack in a row could deploy at the same time; CDK runs them one by one.</span>
+        </div>
+        <div class="zoomrow">
+          <button class="btn" id="z-in" aria-label="Zoom in">＋</button>
+          <button class="btn" id="z-out" aria-label="Zoom out">－</button>
+          <button class="btn" id="z-fit">Fit</button>
+          <span class="sub" style="align-self:center;color:var(--ink-muted)">drag to pan · scroll to zoom</span>
+        </div>
+        <svg class="graph" id="svg" role="img" aria-labelledby="g-title">
+          <g id="viewport">
+            <g id="bands"></g>
+            <g id="edges"></g>
+            <g id="nodes"></g>
+          </g>
+        </svg>
+        <div class="legend" id="legend"></div>
+      </div>
+    </div>
+
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+  </div>
+</div>
+
+<!-- ══ PARALLELISM ════════════════════════════════════════════ -->
+<div id="p-waves" role="tabpanel" aria-labelledby="t-waves" hidden>
+  <div style="padding:22px 24px 40px;max-width:1000px">
+    <div class="tiles">
+      <div class="tile"><div class="tv1">16</div><div class="tl">CDK stacks</div></div>
+      <div class="tile"><div class="tv1">10</div><div class="tl">Dependency levels (waves)</div></div>
+      <div class="tile"><div class="tv1">1</div><div class="tl">Stacks deployed at a time today</div></div>
+      <div class="tile"><div class="tv1">5</div><div class="tl">Stacks that could start together</div></div>
+    </div>
+
+    <div class="chartcard">
+      <h3>Stacks per wave, if CDK ran each dependency level in parallel</h3>
+      <p class="sub">Derived from the <code>addDependency()</code> graph in <code>infra/bin/app.ts</code>.
+         The red rule is what actually happens today: one stack per step, 16 steps.</p>
+      <svg id="wavechart" role="img" aria-label="Bar chart of stacks per dependency wave. Wave L0 has 5 stacks, L6 and L7 have 2 each, every other wave has 1. A reference line marks CDK's actual concurrency of 1." style="width:100%;height:290px"></svg>
+    </div>
+
+    <div class="prose" style="margin-top:22px">
+      <h3 style="font-size:14px;margin:0 0 6px">Why raising concurrency buys less than it looks</h3>
+      <p>Only three waves hold more than one stack, and the middle of the graph is a hard serial chain:
+         <code>storage → vkg → namespace → serve → sources</code>. Both long poles sit inside it —
+         <code>storage</code> (Neptune + OpenSearch Serverless) and <code>serve</code> (AgentCore Runtime).
+         So the critical path is 10 waves deep whatever the concurrency, and parallelism only compresses
+         the 5 independent foundation stacks at L0 and the two pairs at L6/L7.</p>
+      <p><strong>Caveat on the time estimates.</strong> The only published per-stack durations are the
+         <code>~Deploy Time</code> column in <code>infra/README.md</code>, which is stale — it lists a
+         <code>coa-dev-structured</code> stack that no longer exists and omits five that do. This view
+         deliberately counts waves rather than minutes; where a figure is shown it is labelled indicative.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ══ TABLE ══════════════════════════════════════════════════ -->
+<div id="p-table" role="tabpanel" aria-labelledby="t-table" hidden>
+  <div style="padding:22px 24px 40px">
+    <table class="tv" id="tv">
+      <caption>Every stack, its level, one valid deploy position, and each declared dependency.
+        <code>prop</code> = CloudFormation infers it from a cross-stack resource reference.
+        <code>explicit</code> = an <code>addDependency()</code> call, needed because the value arrives
+        through an SSM dynamic reference CDK cannot trace.</caption>
+      <thead>
+        <tr><th>#</th><th>Stack</th><th>Kind</th><th>Level</th><th>Resources</th><th>Depends on</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="tooltip" id="tip" role="presentation"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   DATA — snapshot of infra/bin/app.ts
+   ════════════════════════════════════════════════════════════════ */
+
+const PHASES = [
+  { n: "Phase 1", t: "Gates", s: "scripts/deploy.sh",
+    body: `Nothing is created in AWS yet. Four things happen in order, and the first is a hard gate.`,
+    items: [
+      ["Context mapping", "<code>SCL_*</code> env vars are translated into <code>cdk --context</code> flags. CDK context is <strong>not persisted between deploys</strong> — a variable absent this run silently reverts whatever it configured last run."],
+      ["check-smus-admin-principal.sh", "<strong>Hard gate.</strong> The SMUS admin principal must resolve. Without <code>SCL_SMUS_ADMIN_ARNS</code>, NamespaceStack falls back to <code>arn:aws:iam::&lt;account&gt;:role/Admin</code>, and this script validates that fallback actually exists before CDK runs."],
+      ["JDBC peering resolution", "Reads <code>VpcId</code>/<code>VpcCidr</code> outputs from the optional <code>coa-integ-test-databases</code> stack. Optional, but it <strong>warns loudly</strong> when missing: with these keys absent, serve-stack computes an empty remote-CIDR set and CloudFormation deletes cross-VPC JDBC egress rules an earlier deploy created."],
+      ["Container engine choice", "<code>CDK_DOCKER</code> is set to <code>finch</code> only if its daemon actually answers, else CDK falls back to <code>docker</code>."],
+      ["preflight-deploy.sh", "Nine checks — see the callout below."]
+    ],
+    callout: `<strong>preflight-deploy.sh gates:</strong> 1 toolchain (Node 22+, Java 17+, pnpm) · 2 pip (catches macOS Xcode stubs) · 3 Docker or Finch · 4 Smithy OpenAPI specs present · 5 ECR Public auth <em>(warn only — anonymous pulls work)</em> · 6 VPC quota · 7 Lambda reserved-concurrency headroom · 8 CDK bootstrap in <strong>both</strong> the deploy region and us-east-1 · 9 Bedrock model ids invocable from the region.` },
+
+  { n: "Phase 2", t: "Build + synth", s: "local, no AWS writes",
+    body: `<code>pnpm nx run-many -t build</code>, then <code>cdk synth</code>. Synth is the second gate and fails fast on four classes of misconfiguration.`,
+    items: [
+      ["Model region check", "A Bedrock model id that is a geographic inference profile the deploy region doesn't publish (e.g. a <code>us.</code> profile in <code>ap-northeast-1</code>). Without this the stack reaches CREATE_COMPLETE and every Bedrock call fails at first invoke."],
+      ["Custom domain all-or-nothing", "All five of <code>ui_domain</code>, <code>ui_cert_arn</code>, <code>api_domain</code>, <code>api_cert_arn</code>, <code>hosted_zone_id</code> — or none."],
+      ["Certificate regions", "The UI cert must be in us-east-1 (CloudFront); the API cert in the deploy region."],
+      ["Unwired Smithy paths", "ApiStack fails synth if a Smithy-declared path would fall through to the 501 stub. Fix by wiring the handler, or add it to <code>INTENTIONALLY_STUBBED</code>."]
+    ] },
+
+  { n: "Phase 3", t: "cdk deploy --all", s: "16 stacks, sequential",
+    body: `The graph below. CDK walks a valid topological order of the <code>addDependency()</code> graph,
+           <strong>one stack at a time</strong> — <code>deploy.sh</code> passes no <code>--concurrency</code>,
+           so CDK's default of 1 applies.`,
+    items: [
+      ["Ordering is declared, not inferred", "Most edges CloudFormation infers from cross-stack resource references. But many values travel through SSM dynamic references, which CDK cannot trace — those need an explicit <code>addDependency()</code>. Miss one and a fresh-account deploy bakes a dummy value into a Lambda env var and 502s until redeploy."],
+      ["One stack is cross-region", "<code>edge-waf</code> always deploys to us-east-1, because a CLOUDFRONT-scope WebACL can only exist there."]
+    ] },
+
+  { n: "Phase 4", t: "Connectors", s: "separate CDK apps",
+    body: `<code>connectors/</code> is a separate pnpm workspace with its own CDK apps, so
+           <code>cdk destroy --all</code> and <code>cdk deploy --all</code> never see these.
+           <code>make deploy-dev</code> chains the first one explicitly.`,
+    items: [
+      ["make deploy-databricks-connector", "<strong>Mandatory.</strong> COA's own managed connector — one Lambda serving every <code>DATABRICKS_SQL_WAREHOUSE</code> source. A deployment without it advertises a source sub-type nothing can serve. Its function name carries a reserved <code>-managed-</code> segment that can never change."],
+      ["make deploy-example-connector", "Optional sample, stands in for something a customer deploys in their own account. Both read COA's serve and discovery role ARNs from SSM, so both must run <em>after</em> the platform stacks."]
+    ] }
+];
+
+const STACKS = [
+  { id:"network", kind:"foundation", level:0, est:3,
+    res:"VPC, subnets, VPC endpoints (S3, DynamoDB, Bedrock, AgentCore, ECR, SSM, CloudWatch), Neptune / ECS / Lambda / AOSS / Connector security groups, Cloud Map private DNS namespace",
+    note:"VPC AZs are pinned to the intersection of AgentCore-supported AZs and AZs offering the <code>aoss</code> control-plane endpoint — in us-east-1 that is {1b, 1c}. Skipped when importing a VPC via <code>SCL_VPC_ID</code>.",
+    deps:[] },
+
+  { id:"auth", kind:"foundation", level:0, est:2,
+    res:"Cognito User Pool + App Client (COGNITO/SAML mode) or OIDC wiring; SSM <code>/issuer</code>, <code>/userpool-client-id</code>, <code>/mcp-client-id</code>",
+    note:"", deps:[] },
+
+  { id:"guardrail", kind:"foundation", level:0, est:1,
+    res:"Bedrock Guardrail",
+    note:"No dependencies and nothing depends on it — it deploys whenever CDK gets to it.", deps:[] },
+
+  { id:"authnz", kind:"foundation", level:0, est:3,
+    res:"DynamoDB tables: roles, resource-role mappings, cache invalidation; seed role records",
+    note:"Receives <code>auth.initialClaimsMappings</code>, but those are plain literal values derived from SSM config — <strong>not</strong> a CloudFormation reference. So authnz has no dependency on auth and sits at L0 with it.",
+    deps:[] },
+
+  { id:"edge-waf", kind:"foundation", level:0, est:1,
+    res:"CLOUDFRONT-scope WAF WebACL with AWSManagedRulesCommonRuleSet; publishes its ARN to SSM",
+    note:"<strong>Always us-east-1</strong>, regardless of deploy region — a CloudFront-scope WebACL exists nowhere else. This is why preflight check 8 requires CDK bootstrap in two regions. Only created when <code>cloudfront_web_acl_id</code> is not supplied and credentials are present.",
+    deps:[] },
+
+  { id:"storage", kind:"foundation", level:1, est:15,
+    res:"Neptune cluster, OpenSearch Serverless collection, S3 buckets (ontology artifacts, logs, athena-results 7-day retention, athena-spill 1-day retention)",
+    note:"<strong>Longest single stack (~15 min, indicative)</strong> and the start of the serial chain. Neptune + OpenSearch Serverless are also the ~$930/month idle cost — destroy dev stacks when not in use.",
+    deps:[ ["network","VPC and subnets for the Neptune subnet group and the AOSS VPC endpoint","prop"] ] },
+
+  { id:"vkg", kind:"service", level:2, est:5,
+    res:"ECS Fargate cluster + Ontop task definition for SPARQL↔SQL translation",
+    note:"The cluster is created here, but <strong>per-namespace ECS services are not</strong> — the VKG reload Lambda creates those at runtime on <code>ontology.published</code>, outside CloudFormation. That is why teardown needs a dedicated step for them.",
+    deps:[ ["network","VPC and the Cloud Map service namespace","prop"],
+           ["storage","ontology artifacts bucket","prop"] ] },
+
+  { id:"namespace", kind:"service", level:3, est:5,
+    res:"DataZone / SMUS domain, system project, form + asset types, per-namespace Athena workgroups, namespace deletion pipeline",
+    note:"The domain and its FormType, Project, PolicyGrant, ProjectProfile, UserProfile, ProjectMembership and Owner children are <code>RemovalPolicy.RETAIN</code>, so CloudFormation never attempts to delete them. Teardown step 5 is what actually removes that tree.",
+    deps:[ ["network","VPC and the Lambda security group; Cloud Map namespace id","prop"],
+           ["authnz","roles and resource-role-mapping tables","prop"],
+           ["vkg","VKG cluster ARN","prop"],
+           ["storage","<code>/opensearch/endpoint</code> + <code>/opensearch/collection-name</code> — the deletion pipeline drops a namespace's GraphRAG doc-KG indexes on teardown. CDK cannot infer this from <code>valueForStringParameter</code>, so without this edge a fresh account deploys namespace before those parameters exist.","explicit"] ] },
+
+  { id:"serve", kind:"service", level:4, est:10,
+    res:"AgentCore Runtime hosting context-manager (tiered resolution, NL→SQL/SPARQL, WebSocket /ws), private ALB, DNS resolver Lambda, target group",
+    note:"<strong>Second-longest stack (~10 min, indicative).</strong> Its AgentCore Runtime ENIs are provisioned outside CloudFormation and can take hours to detach after delete — teardown steps 1 and 2 exist entirely for this.",
+    deps:[ ["network","VPC plus the AOSS, Neptune and Lambda security groups","prop"],
+           ["authnz","roles and resource-role-mapping tables","prop"],
+           ["storage","Neptune cluster ARN and endpoint, ontology bucket, Athena results bucket","prop"],
+           ["namespace","<code>/namespace/namespaces-table-name</code>","explicit"],
+           ["auth","<code>/issuer</code>, <code>/userpool-client-id</code>, <code>/mcp-client-id</code>","explicit"] ] },
+
+  { id:"sources", kind:"service", level:5, est:null,
+    res:"Unified source registry — Glue + JDBC discovery, enrichment, scan Step Functions, document preprocessing and GraphRAG",
+    note:"",
+    deps:[ ["network","VPC, security groups, connector egress","prop"],
+           ["storage","Neptune and OpenSearch endpoints","explicit"],
+           ["namespace","namespace registry SSM parameters","explicit"],
+           ["serve","<code>/serve/runtime-role-arn</code> — needed to grant the Serve runtime as a Lake Formation consumer","explicit"] ] },
+
+  { id:"ontology", kind:"service", level:6, est:null,
+    res:"Induction, proposals, validation, reasoning; Neptune and catalog stores",
+    note:"",
+    deps:[ ["network","VPC and the Cloud Map service namespace","prop"],
+           ["storage","Neptune cluster ARN/endpoint and the ontology artifacts bucket","prop"],
+           ["namespace","<code>/namespace/namespaces-table-name</code>, <code>/smus/dz-project-access-role-arn</code>","explicit"],
+           ["sources","<code>/sources/sources-table-name</code>","explicit"] ] },
+
+  { id:"metric-service", kind:"service", level:6, est:null,
+    res:"Metric authoring and validation, OSI v1.0 import/export",
+    note:"",
+    deps:[ ["network","VPC plus the Lambda and AOSS security groups","prop"],
+           ["storage","Neptune cluster ARN and endpoint","prop"],
+           ["namespace","<code>/namespace/namespaces-table-name</code>, <code>/smus/domain-id</code>, <code>/smus/dz-project-access-role-arn</code> — metric validation reads the SMUS catalog","explicit"],
+           ["sources","<code>/sources/sources-table-name</code>","explicit"] ] },
+
+  { id:"data-layer", kind:"service", level:7, est:null,
+    res:"Thin REST Lambda in front of the Serve runtime",
+    note:"",
+    deps:[ ["network","VPC and the Lambda security group","prop"],
+           ["serve","<code>/serve/runtime-arn</code>","explicit"],
+           ["ontology","<code>/ontology-engine/api-fn-arn</code> for the direct-invoke DescribeSchema handler. Without this edge a fresh-account deploy can resolve data-layer first, bake a dummy ARN into the Lambda env, and 502 every schema call until redeploy.","explicit"] ] },
+
+  { id:"mcp", kind:"service", level:7, est:null,
+    res:"MCP tools for agents, on AgentCore Runtime",
+    note:"Like serve, this is an AgentCore Runtime — teardown step 1 deletes both, reading <code>/serve/runtime-arn</code> and <code>/mcp/runtime-arn</code> from SSM.",
+    deps:[ ["network","VPC","prop"],
+           ["authnz","roles and resource-role-mapping tables","prop"],
+           ["serve","context-manager runtime ARN","explicit"],
+           ["metric-service","<code>/metric/api-fn-arn</code> for the discovery tools","explicit"],
+           ["ontology","<code>/ontology-engine/api-fn-arn</code> for the discovery tools","explicit"],
+           ["auth","<code>/issuer</code>, <code>/userpool-client-id</code>, <code>/mcp-client-id</code>","explicit"] ] },
+
+  { id:"api", kind:"service", level:8, est:3,
+    res:"API Gateway, Cedar Lambda authorizer, cache-invalidation Lambda (DynamoDB Streams → authorizer role-cache version bump) with DLQ",
+    note:"Routes are wired by SSM parameter in <code>pathHandlers</code>/<code>ssmPathHandlers</code>. This stack <strong>fails synth</strong> if a Smithy-declared path would fall through to the 501 stub — so it transitively depends on every backend that owns a route.",
+    deps:[ ["network","VPC","prop"],
+           ["authnz","roles, resource-role-mapping and cache-invalidation tables","prop"],
+           ["auth","<code>/issuer</code>, <code>/userpool-client-id</code>","explicit"],
+           ["namespace","<code>/namespace/namespaces-table-name</code> for the authorizer","explicit"],
+           ["sources","<code>/sources/api-fn-arn</code> and the namespace-role / grant function ARNs","explicit"],
+           ["metric-service","<code>/metric/api-fn-arn</code>","explicit"],
+           ["ontology","<code>/ontology-engine/api-fn-arn</code>","explicit"],
+           ["data-layer","<code>/data-layer/api-fn-arn</code> for query, translate, kb/search, graph/traverse, schema","explicit"] ] },
+
+  { id:"web", kind:"service", level:9, est:5,
+    res:"CloudFront distribution, S3 site bucket, VPC Origin for the <code>/ws</code> WebSocket path",
+    note:"Deliberately derives <code>isCognitoMode</code> from the same SSM config the auth stack was built from, rather than from auth's construct properties — that avoids a cross-stack export lock.",
+    deps:[ ["auth","Cognito mode and callback URL patch","explicit"],
+           ["api","API URL, REST API id, stage name","prop"],
+           ["serve","Serve query endpoint for the <code>/ws</code> VPC Origin","prop"],
+           ["edge-waf","CloudFront WebACL ARN, read from SSM across regions","explicit"] ] }
+];
+
+/* ════════════════════════════════════════════════════════════════
+   DERIVED
+   ════════════════════════════════════════════════════════════════ */
+
+const byId = new Map(STACKS.map(s => [s.id, s]));
+// One valid topological order: level, then declaration order. CDK is free to
+// pick any valid order, so this is "a" sequence, not "the" sequence.
+const ORDER = [...STACKS].sort((a, b) => a.level - b.level || STACKS.indexOf(a) - STACKS.indexOf(b));
+ORDER.forEach((s, i) => { s.pos = i + 1; });
+
+const dependents = new Map(STACKS.map(s => [s.id, []]));
+STACKS.forEach(s => s.deps.forEach(([on]) => dependents.get(on).push(s.id)));
+
+const MAXL = Math.max(...STACKS.map(s => s.level));
+const byLevel = Array.from({ length: MAXL + 1 }, (_, l) => STACKS.filter(s => s.level === l));
+
+function ancestors(id, acc = new Set()) {
+  byId.get(id).deps.forEach(([on]) => { if (!acc.has(on)) { acc.add(on); ancestors(on, acc); } });
+  return acc;
+}
+function descendants(id, acc = new Set()) {
+  dependents.get(id).forEach(d => { if (!acc.has(d)) { acc.add(d); descendants(d, acc); } });
+  return acc;
+}
+
+const KIND = {
+  foundation: { label: "Foundation", color: "var(--foundation)", glyph: "dot" },
+  service:    { label: "Service",    color: "var(--service)",    glyph: "sq"  }
+};
+
+// Stacks almost everything depends on. Their edges are drawn faded so the
+// structural chain stays readable; selecting a node restores them to full.
+const AMBIENT = new Set(["network", "auth", "authnz"]);
+
+/* ════════════════════════════════════════════════════════════════
+   LAYOUT
+   ════════════════════════════════════════════════════════════════ */
+
+const NW = 164, NH = 50, HGAP = 22, VGAP = 40, PAD = 34, LANE = 96;
+const layouts = {};
+{
+  // Levels view: one row per dependency level, nodes centred.
+  const widest = Math.max(...byLevel.map(r => r.length));
+  const rowW = widest * NW + (widest - 1) * HGAP;
+  const L = {};
+  byLevel.forEach((row, l) => {
+    const w = row.length * NW + (row.length - 1) * HGAP;
+    const x0 = PAD + LANE + (rowW - w) / 2;
+    row.forEach((s, i) => { L[s.id] = { x: x0 + i * (NW + HGAP), y: PAD + l * (NH + VGAP) }; });
+  });
+  layouts.levels = { pos: L, w: PAD * 2 + LANE + rowW, h: PAD * 2 + (MAXL + 1) * (NH + VGAP) - VGAP, mode: "levels" };
+
+  // Deploy-order view: a single column in sequence, edges arc out to the right.
+  const O = {}, ROWH = 36, OW = 240;
+  ORDER.forEach((s, i) => { O[s.id] = { x: PAD + LANE, y: PAD + i * ROWH }; });
+  layouts.order = { pos: O, w: PAD * 2 + LANE + OW + 230, h: PAD * 2 + ORDER.length * ROWH, mode: "order", nw: OW, nh: 28 };
+}
+
+/* ════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════ */
+
+const state = { view: "levels", highlight: true, sel: null, step: -1, playing: null };
+const $ = id => document.getElementById(id);
+const svg = $("svg"), vp = $("viewport"), gB = $("bands"), gE = $("edges"), gN = $("nodes");
+const tip = $("tip");
+let cam = { x: 0, y: 0, k: 1 };
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const stripTags = s => String(s).replace(/<[^>]+>/g, "");
+const el = (n, a = {}) => { const e = document.createElementNS("http://www.w3.org/2000/svg", n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+/* ════════════════════════════════════════════════════════════════
+   RENDER GRAPH
+   ════════════════════════════════════════════════════════════════ */
+
+function render() {
+  const L = layouts[state.view];
+  const nw = L.nw || NW, nh = L.nh || NH;
+  gB.textContent = ""; gE.textContent = ""; gN.textContent = "";
+
+  if (L.mode === "levels") {
+    byLevel.forEach((row, l) => {
+      const y = PAD + l * (NH + VGAP);
+      gB.appendChild(el("rect", { class: "lvlband", x: PAD, y: y - 11, width: L.w - PAD * 2, height: NH + 22, rx: 7, opacity: l % 2 ? .55 : .25 }));
+      const t = el("text", { class: "lvllabel", x: PAD + 12, y: y + NH / 2 - 3 }); t.textContent = "L" + l; gB.appendChild(t);
+      const n = el("text", { class: "lvlnote", x: PAD + 12, y: y + NH / 2 + 11 });
+      n.textContent = row.length > 1 ? row.length + " together" : "";
+      gB.appendChild(n);
+    });
+  } else {
+    ORDER.forEach((s, i) => {
+      const p = L.pos[s.id];
+      if (i % 2) gB.appendChild(el("rect", { class: "lvlband", x: PAD, y: p.y - 3, width: L.w - PAD * 2, height: nh + 6, rx: 5, opacity: .4 }));
+      const t = el("text", { class: "lvllabel", x: PAD + 10, y: p.y + nh / 2 + 4 });
+      t.textContent = String(i + 1).padStart(2, "0"); gB.appendChild(t);
+    });
+  }
+
+  // Edges
+  STACKS.forEach(s => {
+    const t = L.pos[s.id];
+    s.deps.forEach(([on, , via]) => {
+      const f = L.pos[on];
+      let d;
+      if (L.mode === "levels") {
+        const x1 = f.x + nw / 2, y1 = f.y + nh, x2 = t.x + nw / 2, y2 = t.y;
+        const m = Math.max(18, (y2 - y1) / 2);
+        d = `M${x1},${y1} C${x1},${y1 + m} ${x2},${y2 - m} ${x2},${y2}`;
+      } else {
+        const rows = Math.abs(ORDER.indexOf(s) - ORDER.indexOf(byId.get(on)));
+        const k = 24 + rows * 13;
+        const x1 = f.x + nw, y1 = f.y + nh / 2, x2 = t.x + nw, y2 = t.y + nh / 2;
+        d = `M${x1},${y1} C${x1 + k},${y1} ${x2 + k},${y2} ${x2},${y2}`;
+      }
+      gE.appendChild(el("path", { class: "edge" + (AMBIENT.has(on) ? " ambient" : ""), d, "data-from": on, "data-to": s.id }));
+    });
+  });
+
+  // Nodes
+  STACKS.forEach(s => {
+    const p = L.pos[s.id], k = KIND[s.kind];
+    const g = el("g", { class: "node", "data-id": s.id, tabindex: "0", role: "button",
+      "aria-label": `${s.id} stack, ${k.label}, level ${s.level}, deploy position ${s.pos} of ${ORDER.length}` });
+    g.appendChild(el("rect", { class: "body", x: p.x, y: p.y, width: nw, height: nh, rx: 5 }));
+    g.appendChild(el("rect", { class: "accent", x: p.x, y: p.y, width: 3, height: nh, rx: 1.5, fill: k.color }));
+    g.appendChild(el("rect", { class: "pulse", x: p.x - 3, y: p.y - 3, width: nw + 6, height: nh + 6, rx: 7 }));
+    if (k.glyph === "dot") g.appendChild(el("circle", { cx: p.x + 17, cy: p.y + (L.mode === "levels" ? 19 : nh / 2), r: 4, fill: k.color }));
+    else g.appendChild(el("rect", { x: p.x + 13, y: p.y + (L.mode === "levels" ? 15 : nh / 2 - 4), width: 8, height: 8, rx: 1, fill: k.color }));
+
+    const nm = el("text", { class: "nm", x: p.x + 29, y: p.y + (L.mode === "levels" ? 23 : nh / 2 + 4) });
+    nm.textContent = s.id; g.appendChild(nm);
+    if (L.mode === "levels") {
+      const m = el("text", { class: "meta", x: p.x + 13, y: p.y + 39 });
+      m.textContent = `L${s.level} · step ${s.pos}` + (s.est ? ` · ~${s.est}m` : "");
+      g.appendChild(m);
+    } else {
+      const m = el("text", { class: "meta", x: p.x + nw - 8, y: p.y + nh / 2 + 4, "text-anchor": "end" });
+      m.textContent = `L${s.level}` + (s.est ? ` · ~${s.est}m` : ""); g.appendChild(m);
+    }
+    gN.appendChild(g);
+  });
+
+  svg.setAttribute("viewBox", `0 0 ${L.w} ${L.h}`);
+  paint();
+}
+
+/* Visual state: selection highlight + step-through. */
+function paint() {
+  const anc = state.sel && state.highlight ? ancestors(state.sel) : null;
+  const desc = state.sel && state.highlight ? descendants(state.sel) : null;
+  const stepping = state.step >= 0;
+
+  gN.querySelectorAll("g.node").forEach(g => {
+    const id = g.dataset.id, s = byId.get(id);
+    g.classList.remove("dim", "sel", "pending", "active", "done");
+    if (id === state.sel) g.classList.add("sel");
+    if (anc && id !== state.sel && !anc.has(id) && !desc.has(id)) g.classList.add("dim");
+    if (stepping) {
+      if (s.pos - 1 < state.step) g.classList.add("done");
+      else if (s.pos - 1 === state.step) g.classList.add("active");
+      else g.classList.add("pending");
+    }
+  });
+
+  gE.querySelectorAll(".edge").forEach(p => {
+    p.classList.remove("hl", "hl-down", "dim");
+    if (!anc) return;
+    const { from, to } = p.dataset;
+    const up = (to === state.sel && anc.has(from)) || (anc.has(to) && anc.has(from));
+    const down = (from === state.sel && desc.has(to)) || (desc.has(from) && desc.has(to));
+    if (up) p.classList.add("hl"); else if (down) p.classList.add("hl-down"); else p.classList.add("dim");
+  });
+
+  $("s-read").textContent = stepping
+    ? `${state.step + 1} / ${ORDER.length} — ${ORDER[state.step].id}`
+    : "not started";
+  $("s-prev").disabled = state.step <= 0;
+  $("s-next").disabled = state.step >= ORDER.length - 1;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   DETAIL PANEL
+   ════════════════════════════════════════════════════════════════ */
+
+function depRow([on, why, via]) {
+  const k = KIND[byId.get(on).kind];
+  const g = k.glyph === "dot" ? `<span class="dot" style="background:${k.color}"></span>`
+                              : `<span class="sq" style="background:${k.color}"></span>`;
+  return `<li><span class="dn">${g}<button class="jump" data-jump="${on}">${on}</button></span>
+    <span class="via">${via}</span><span class="dw">${why}</span></li>`;
+}
+
+function showStack(id) {
+  const s = byId.get(id), k = KIND[s.kind];
+  const dn = dependents.get(id);
+  const anc = ancestors(id), desc = descendants(id);
+  const g = k.glyph === "dot" ? `<span class="dot" style="background:${k.color}"></span>`
+                              : `<span class="sq" style="background:${k.color}"></span>`;
+  $("panel").innerHTML = `
+    <h2>coa-dev-${esc(s.id)}</h2>
+    <div class="kindrow">
+      <span class="badge">${g}${k.label}</span>
+      <span class="badge">Level ${s.level}</span>
+      ${s.id === "edge-waf" ? '<span class="badge">us-east-1</span>' : ""}
+    </div>
+    <dl class="kv">
+      <dt>Deploy position</dt><dd>${s.pos} of ${ORDER.length}</dd>
+      <dt>Destroy position</dt><dd>${ORDER.length - s.pos + 1} of ${ORDER.length}</dd>
+      <dt>Est. duration</dt><dd>${s.est ? "~" + s.est + " min <span style='color:var(--ink-muted)'>(indicative)</span>" : "<span style='color:var(--ink-muted)'>not published</span>"}</dd>
+      <dt>Blocks (transitive)</dt><dd>${desc.size} stack${desc.size === 1 ? "" : "s"}</dd>
+      <dt>Waits on (transitive)</dt><dd>${anc.size} stack${anc.size === 1 ? "" : "s"}</dd>
+    </dl>
+    <h3>Resources</h3><p>${s.res}</p>
+    ${s.note ? `<div class="callout">${s.note}</div>` : ""}
+    <h3>Depends on — ${s.deps.length}</h3>
+    ${s.deps.length ? `<ul class="deps">${s.deps.map(depRow).join("")}</ul>`
+                    : `<p class="empty">Nothing. Deploys as soon as CDK reaches it.</p>`}
+    <h3>Depended on by — ${dn.length}</h3>
+    ${dn.length ? `<ul class="deps">${dn.map(d => depRow([d, byId.get(d).deps.find(x => x[0] === id)[1], byId.get(d).deps.find(x => x[0] === id)[2]])).join("")}</ul>`
+                : `<p class="empty">Nothing. Nothing waits on this stack.</p>`}`;
+  wireJumps();
+}
+
+function showPhase(i) {
+  const p = PHASES[i];
+  $("panel").innerHTML = `
+    <h2>${p.n} — ${esc(p.t)}</h2>
+    <div class="kindrow"><span class="badge">${esc(p.s)}</span></div>
+    <p>${p.body}</p>
+    <h3>What happens</h3>
+    <ul class="deps">${p.items.map(([t, d]) => `<li><span class="dn">${t}</span><span class="dw">${d}</span></li>`).join("")}</ul>
+    ${p.callout ? `<div class="callout">${p.callout}</div>` : ""}`;
+  [...$("phases").children].forEach((b, j) => b.setAttribute("aria-current", j === i ? "true" : "false"));
+}
+
+function showIntro() {
+  $("panel").innerHTML = `
+    <h2>Pick anything</h2>
+    <p>Click a stack in the graph, or a phase card above it, to see what it creates,
+       what it waits on, and <em>why</em> each dependency exists.</p>
+    <h3>The three questions this answers</h3>
+    <ul class="deps">
+      <li><span class="dn">Sequential or parallel?</span><span class="dw">
+        Sequential. <code>cdk deploy --all</code> runs with CDK's default concurrency of 1.
+        The <strong>Parallelism</strong> tab shows what concurrency would and wouldn't buy.</span></li>
+      <li><span class="dn">What breaks if a stack fails?</span><span class="dw">
+        Click it. Downstream stacks light up in orange, upstream in blue. The counts are in the panel.</span></li>
+      <li><span class="dn">Why is this edge here at all?</span><span class="dw">
+        Each dependency is tagged <code>prop</code> (CloudFormation infers it from a cross-stack
+        reference) or <code>explicit</code> (an <code>addDependency()</code> call, because the value
+        travels through an SSM dynamic reference CDK cannot trace).</span></li>
+    </ul>
+    <div class="callout"><strong>Teardown is the exact reverse</strong> of this graph, plus six
+      pre-steps for resources CloudFormation does not own. See <code>destroy-explorer.html</code>.</div>`;
+  [...$("phases").children].forEach(b => b.setAttribute("aria-current", "false"));
+}
+
+function wireJumps() {
+  $("panel").querySelectorAll("[data-jump]").forEach(b =>
+    b.addEventListener("click", () => select(b.dataset.jump)));
+}
+
+function select(id) {
+  state.sel = id;
+  showStack(id);
+  paint();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   INTERACTION
+   ════════════════════════════════════════════════════════════════ */
+
+gN.addEventListener("click", e => { const g = e.target.closest("g.node"); if (g) select(g.dataset.id); });
+gN.addEventListener("focusin", e => { const g = e.target.closest("g.node"); if (g) select(g.dataset.id); });
+gN.addEventListener("keydown", e => {
+  const g = e.target.closest("g.node"); if (!g) return;
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(g.dataset.id); }
+});
+
+gN.addEventListener("mousemove", e => {
+  const g = e.target.closest("g.node");
+  if (!g) { tip.style.opacity = 0; return; }
+  const s = byId.get(g.dataset.id);
+  tip.innerHTML = `<strong>coa-dev-${esc(s.id)}</strong>
+    <span>${KIND[s.kind].label} · L${s.level} · step ${s.pos} of ${ORDER.length}<br>
+    waits on ${ancestors(s.id).size}, blocks ${descendants(s.id).size}</span>`;
+  tip.style.opacity = 1;
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - r.width - 10) + "px";
+  tip.style.top = Math.min(e.clientY + 14, innerHeight - r.height - 10) + "px";
+});
+gN.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
+
+// Pan + zoom
+let drag = null;
+svg.addEventListener("pointerdown", e => {
+  if (e.target.closest("g.node")) return;
+  drag = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y };
+  svg.classList.add("dragging"); svg.setPointerCapture(e.pointerId);
+});
+svg.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const L = layouts[state.view], sc = L.w / svg.clientWidth;
+  cam.x = drag.cx + (e.clientX - drag.x) * sc;
+  cam.y = drag.cy + (e.clientY - drag.y) * sc;
+  applyCam();
+});
+svg.addEventListener("pointerup", e => { drag = null; svg.classList.remove("dragging"); svg.releasePointerCapture(e.pointerId); });
+svg.addEventListener("wheel", e => { e.preventDefault(); zoom(e.deltaY < 0 ? 1.12 : 1 / 1.12); }, { passive: false });
+
+function applyCam() { vp.setAttribute("transform", `translate(${cam.x} ${cam.y}) scale(${cam.k})`); }
+function zoom(f) { cam.k = Math.min(3, Math.max(.3, cam.k * f)); applyCam(); }
+function fit() { cam = { x: 0, y: 0, k: 1 }; applyCam(); }
+$("z-in").onclick = () => zoom(1.2);
+$("z-out").onclick = () => zoom(1 / 1.2);
+$("z-fit").onclick = fit;
+
+// Toggles
+function seg(onId, offId, set) {
+  $(onId).onclick = () => { $(onId).setAttribute("aria-pressed", "true"); $(offId).setAttribute("aria-pressed", "false"); set(true); };
+  $(offId).onclick = () => { $(offId).setAttribute("aria-pressed", "true"); $(onId).setAttribute("aria-pressed", "false"); set(false); };
+}
+seg("v-levels", "v-order", on => {
+  state.view = on ? "levels" : "order";
+  $("g-sub").textContent = on
+    ? "Rows are dependency levels. Every stack in a row could deploy at the same time; CDK runs them one by one."
+    : "One valid topological order, top to bottom — what CDK actually does. Arcs on the right are the dependencies each step satisfies.";
+  fit(); render();
+});
+seg("h-on", "h-off", on => { state.highlight = on; paint(); });
+
+// Step-through
+function stop() { if (state.playing) { clearInterval(state.playing); state.playing = null; $("s-play").textContent = "▶ Play"; } }
+function goto(i) { state.step = Math.max(0, Math.min(ORDER.length - 1, i)); select(ORDER[state.step].id); }
+$("s-next").onclick = () => { stop(); goto(state.step + 1); };
+$("s-prev").onclick = () => { stop(); goto(state.step - 1); };
+$("s-reset").onclick = () => { stop(); state.step = -1; state.sel = null; showIntro(); paint(); };
+$("s-play").onclick = () => {
+  if (state.playing) return stop();
+  if (state.step >= ORDER.length - 1) state.step = -1;
+  $("s-play").textContent = "❚❚ Pause";
+  state.playing = setInterval(() => {
+    if (state.step >= ORDER.length - 1) return stop();
+    goto(state.step + 1);
+  }, 850);
+  goto(state.step + 1);
+};
+
+// Tabs
+const TABS = [["t-graph", "p-graph"], ["t-waves", "p-waves"], ["t-table", "p-table"]];
+TABS.forEach(([t, p]) => $(t).onclick = () => {
+  stop();
+  TABS.forEach(([t2, p2]) => {
+    const on = t2 === t;
+    $(t2).setAttribute("aria-selected", on); $(t2).setAttribute("aria-pressed", on);
+    $(p2).hidden = !on;
+  });
+});
+
+// Theme
+$("theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? "dark"
+    : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark");
+  document.documentElement.setAttribute("data-theme", next);
+};
+
+/* ════════════════════════════════════════════════════════════════
+   STATIC BUILDS: phases, legend, table, waves chart
+   ════════════════════════════════════════════════════════════════ */
+
+$("phases").innerHTML = PHASES.map((p, i) =>
+  `<button class="phase" data-phase="${i}" aria-current="false">
+     <span class="pn">${p.n}</span><span class="pt">${esc(p.t)}</span><span class="ps">${esc(p.s)}</span>
+   </button>`).join("");
+$("phases").querySelectorAll("[data-phase]").forEach(b =>
+  b.addEventListener("click", () => { state.sel = null; paint(); showPhase(+b.dataset.phase); }));
+
+$("legend").innerHTML = `
+  <span class="lg"><span class="dot" style="background:var(--foundation)"></span>Foundation stack</span>
+  <span class="lg"><span class="sq" style="background:var(--service)"></span>Service stack</span>
+  <span class="lg"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--foundation)" stroke-width="2"/></svg>Upstream — must finish first</span>
+  <span class="lg"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--service)" stroke-width="2"/></svg>Downstream — blocked by this</span>
+  <span class="lg"><svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="var(--axis)" stroke-width="2" opacity=".16"/></svg>network / auth / authnz — faded, they feed nearly everything</span>
+  <span class="lg"><svg width="26" height="12"><rect x="1" y="1" width="24" height="10" rx="2" fill="none" stroke="var(--axis)" stroke-dasharray="3 3"/></svg>Not yet deployed (step mode)</span>`;
+
+$("tv").querySelector("tbody").innerHTML = ORDER.map(s => `
+  <tr>
+    <td class="num">${s.pos}</td>
+    <td><strong>coa-dev-${esc(s.id)}</strong></td>
+    <td>${KIND[s.kind].label}</td>
+    <td class="num">L${s.level}</td>
+    <td>${stripTags(s.res)}</td>
+    <td>${s.deps.length
+      ? s.deps.map(([on, why, via]) => `<div style="margin-bottom:4px"><strong>${on}</strong>
+          <span class="via">${via}</span><br><span style="color:var(--ink-2)">${stripTags(why)}</span></div>`).join("")
+      : '<span style="color:var(--ink-muted)">—</span>'}</td>
+  </tr>`).join("");
+
+(function waves() {
+  const c = $("wavechart"), W = 760, H = 290, M = { t: 16, r: 20, b: 44, l: 34 };
+  const data = byLevel.map((r, l) => ({ l, n: r.length, names: r.map(s => s.id) }));
+  const maxY = 5, pw = W - M.l - M.r, ph = H - M.t - M.b;
+  const bw = pw / data.length, inner = Math.min(46, bw - 14);
+  const y = v => M.t + ph - (v / maxY) * ph;
+  c.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  let s = "";
+  for (let v = 0; v <= maxY; v++) {
+    s += `<line class="${v === 0 ? "axis-line" : "grid-line"}" x1="${M.l}" y1="${y(v)}" x2="${W - M.r}" y2="${y(v)}"/>
+          <text class="axis-txt" x="${M.l - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  }
+  data.forEach((d, i) => {
+    const x = M.l + i * bw + (bw - inner) / 2, h = ph - (y(d.n) - M.t);
+    s += `<rect class="bar" x="${x}" y="${y(d.n)}" width="${inner}" height="${h}" rx="4">
+            <title>L${d.l}: ${d.n} stack${d.n > 1 ? "s" : ""} — ${d.names.join(", ")}</title></rect>`;
+    if (d.n > 1) s += `<text class="barlbl" x="${x + inner / 2}" y="${y(d.n) - 7}" text-anchor="middle">${d.n}</text>`;
+    s += `<text class="axis-txt" x="${M.l + i * bw + bw / 2}" y="${H - M.b + 18}" text-anchor="middle">L${d.l}</text>`;
+  });
+  s += `<line class="refline" x1="${M.l}" y1="${y(1)}" x2="${W - M.r}" y2="${y(1)}"/>
+        <text class="reflabel" x="${W - M.r}" y="${y(1) - 8}" text-anchor="end">CDK today — 1 stack at a time</text>
+        <text class="axis-txt" x="${M.l + pw / 2}" y="${H - 6}" text-anchor="middle">dependency level (wave)</text>`;
+  c.innerHTML = s;
+})();
+
+render();
+showIntro();
+</script>
+</body>
+</html>

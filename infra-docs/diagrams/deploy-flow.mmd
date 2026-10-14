@@ -1,0 +1,153 @@
+%% COA deployment flow — `make deploy-dev`
+%% Source of truth: Makefile, scripts/deploy.sh, scripts/preflight-deploy.sh, infra/bin/app.ts
+%% L0-L9 = topological levels of the addDependency() graph.
+%% CDK COULD run each level in parallel, but `cdk deploy --all` has no
+%% --concurrency flag, so it runs ONE stack at a time in a valid topological order.
+
+flowchart TD
+
+  %% ── Phase 1: gates. No AWS resource is created yet. ──
+  subgraph PH1["PHASE 1 — Gates (scripts/deploy.sh)"]
+    direction TB
+    G0["Map SCL_* env vars to cdk --context flags"]
+    G1["check-smus-admin-principal.sh - HARD GATE: SMUS admin ARN must resolve"]
+    G2["Resolve JDBC peering from coa-integ-test-databases outputs - optional, WARNS if absent"]
+    G3["Pick CDK_DOCKER - finch only if its daemon answers, else docker"]
+    G4["preflight-deploy.sh - 9 checks, see note"]
+    G0 --> G1 --> G2 --> G3 --> G4
+  end
+
+  %% ── Phase 2: build + synth, still local. ──
+  subgraph PH2["PHASE 2 — Build and synth (local)"]
+    direction TB
+    B1["pnpm nx run-many -t build"]
+    B2["cdk synth - fails on model-region, custom-domain, cert-region, unwired Smithy path"]
+    B1 --> B2
+  end
+
+  G4 --> B1
+
+  %% ── Phase 3: cdk deploy --all. SEQUENTIAL. ──
+  subgraph PH3["PHASE 3 — cdk deploy --all (sequential, concurrency 1)"]
+    direction TB
+
+    subgraph L0["L0 - no dependencies (5 stacks, parallel-capable)"]
+      direction LR
+      NET["coa-dev-network - VPC, subnets, VPC endpoints, SGs, Cloud Map namespace"]
+      AUTH["coa-dev-auth - Cognito or OIDC, SSM issuer and client ids"]
+      GRD["coa-dev-guardrail - Bedrock guardrail"]
+      ANZ["coa-dev-authnz - Cedar roles and resource-role-mapping DynamoDB"]
+      EWAF["coa-dev-edge-waf - CLOUDFRONT WebACL, always us-east-1"]
+    end
+
+    subgraph L1["L1"]
+      STO["coa-dev-storage - Neptune cluster, OpenSearch Serverless, S3 buckets - LONGEST, ~15 min"]
+    end
+
+    subgraph L2["L2"]
+      VKG["coa-dev-vkg - Ontop ECS Fargate cluster, no services yet"]
+    end
+
+    subgraph L3["L3"]
+      NS["coa-dev-namespace - DataZone/SMUS domain, project, asset types, Athena workgroups"]
+    end
+
+    subgraph L4["L4"]
+      SRV["coa-dev-serve - AgentCore Runtime for context-manager, private ALB - ~10 min"]
+    end
+
+    subgraph L5["L5"]
+      SRC["coa-dev-sources - Glue/JDBC discovery, scan Step Functions, GraphRAG"]
+    end
+
+    subgraph L6["L6 - parallel-capable"]
+      direction LR
+      ONT["coa-dev-ontology - induction, proposals, validation, Neptune stores"]
+      MET["coa-dev-metric-service - metric authoring, OSI import/export"]
+    end
+
+    subgraph L7["L7 - parallel-capable"]
+      direction LR
+      DL["coa-dev-data-layer - thin REST Lambda in front of Serve"]
+      MCP["coa-dev-mcp - MCP tools on AgentCore Runtime"]
+    end
+
+    subgraph L8["L8"]
+      API["coa-dev-api - API Gateway, Cedar authorizer, cache-invalidation Lambda"]
+    end
+
+    subgraph L9["L9"]
+      WEB["coa-dev-web - CloudFront, S3 site, VPC Origin for /ws"]
+    end
+
+    %% Edges. Labels only where the reason is not obvious from the name.
+    NET --> STO
+    NET --> VKG
+    STO --> VKG
+
+    NET --> NS
+    ANZ --> NS
+    VKG --> NS
+    STO -->|"/opensearch/endpoint + collection-name"| NS
+
+    NS -->|"/namespace/namespaces-table-name"| SRV
+    AUTH -->|"/issuer, /userpool-client-id, /mcp-client-id"| SRV
+
+    NS --> SRC
+    STO --> SRC
+    SRV -->|"/serve/runtime-role-arn for Lake Formation consumer grant"| SRC
+
+    NS --> ONT
+    SRC -->|"/sources/sources-table-name"| ONT
+    NS --> MET
+    SRC -->|"/sources/sources-table-name"| MET
+
+    SRV -->|"/serve/runtime-arn"| DL
+    ONT -->|"/ontology-engine/api-fn-arn for DescribeSchema"| DL
+
+    SRV --> MCP
+    MET --> MCP
+    ONT --> MCP
+    AUTH --> MCP
+
+    SRC --> API
+    MET --> API
+    ONT --> API
+    DL --> API
+    AUTH --> API
+    NS --> API
+
+    AUTH --> WEB
+    API --> WEB
+    SRV --> WEB
+    EWAF -->|"WebACL ARN via SSM, cross-region"| WEB
+  end
+
+  B2 --> NET
+
+  %% ── Phase 4: separate CDK app, outside `cdk deploy --all`. ──
+  subgraph PH4["PHASE 4 — Post-deploy (separate CDK apps in connectors/)"]
+    direction TB
+    DBX["make deploy-databricks-connector - COA-operated, MANDATORY: DATABRICKS_SQL_WAREHOUSE sources cannot register without it"]
+    EXC["make deploy-example-connector - OPTIONAL, sample. Both read COA role ARNs from SSM, so must run AFTER"]
+    DBX -.-> EXC
+  end
+
+  WEB --> DBX
+
+  NOTE["preflight-deploy.sh gates: 1 toolchain, 2 pip, 3 Docker/Finch, 4 Smithy specs, 5 ECR Public auth (warn only), 6 VPC quota, 7 Lambda reserved-concurrency headroom, 8 CDK bootstrap in BOTH deploy region and us-east-1, 9 Bedrock model ids invocable from region"]
+  G4 -.- NOTE
+
+  classDef gate fill:#FFF4E5,stroke:#B35C00,color:#3D2200
+  classDef local fill:#EEF2FF,stroke:#3730A3,color:#1E1B4B
+  classDef stack fill:#E8F5F0,stroke:#0F766E,color:#042F2A
+  classDef slow fill:#FDECEC,stroke:#B42318,color:#4A0F0C
+  classDef extra fill:#F5F0FF,stroke:#6D28D9,color:#2E1065
+  classDef note fill:#FAFAF8,stroke:#9A9A93,color:#3F3F3A
+
+  class G0,G1,G2,G3,G4 gate
+  class B1,B2 local
+  class NET,AUTH,GRD,ANZ,EWAF,VKG,NS,SRC,ONT,MET,DL,MCP,API,WEB stack
+  class STO,SRV slow
+  class DBX,EXC extra
+  class NOTE note

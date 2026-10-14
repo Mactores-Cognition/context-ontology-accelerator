@@ -10,9 +10,9 @@ and `infra/bin`, and the boto3 clients instantiated under `packages/` and
 
 | | |
 |---|---|
-| Repo version | `0.3.4` |
+| Repo version | `0.3.4` — the version this team is pinned to |
 | Commit | `c84a304` (mirror sync) |
-| Reviewed | 2026-10-08 |
+| Reviewed | 2026-10-08 · re-verified against the pinned tree 2026-10-14 |
 | Deploy stacks | 16 |
 
 ---
@@ -30,7 +30,7 @@ and `infra/bin`, and the boto3 clients instantiated under `packages/` and
 
 | Service | Used for |
 |---|---|
-| Amazon Neptune | Knowledge-graph store (RDF/SPARQL) — one `db.r8g.large` instance |
+| Amazon Neptune | Knowledge-graph store (RDF/SPARQL) — one `db.r8g.large` instance. On v0.3.4 that class is hardcoded (`storage-stack.ts` line 118); shrinking it for dev is a code edit, see `COA-Redeployment-Guide.md` §4.2 |
 | Amazon OpenSearch Serverless | Vector search for retrieval and grounding (NEXTGEN collection) |
 | Amazon DynamoDB | Job/proposal state, roles, grants, Cedar policies, sessions |
 | Amazon S3 | Ontology artifacts, staged documents, web assets, access logs |
@@ -116,7 +116,7 @@ separately.
 
 | Prerequisite | Why it matters |
 |---|---|
-| **Bedrock model access** | Must be requested in the console for Claude Sonnet 4.6, Claude Haiku 4.5, Claude Sonnet 5, and Cohere Embed v4. The deploy cannot grant this, and `cdk synth` cannot detect whether you have it. |
+| **Bedrock model access** | Must be requested in the console for Claude Sonnet 4.6, Claude Haiku 4.5, Claude Sonnet 5, and Cohere Embed v4. On v0.3.4 the deploy's defaults are Sonnet 5 (query + induction), Haiku 4.5 (chat) and Cohere Embed v4 (`preflight-deploy.sh` lines 269–272); Sonnet 4.6 is the ontology-engine inducer's in-code fallback. Preflight checks the IDs are *invocable from the region*, but neither it nor `cdk synth` can detect whether your account has been granted access. |
 | **CloudTrail trail logging management events** | Required for the Databricks connector parameter-integrity alarm to observe anything. The deploy creates no trail by design — that belongs to the account baseline. Most enterprise accounts already have one; without it the alarm is **blind**, not quiet. |
 | **Amazon ECR Public** | Build-time base-image pulls. `us-east-1` only, regardless of deploy region. Handled automatically by the deploy's preflight checks. |
 
@@ -163,7 +163,7 @@ project's own estimate):
 | Service | Why it costs when idle |
 |---|---|
 | Amazon Neptune | One always-on provisioned instance — not Serverless |
-| Amazon OpenSearch Serverless | Bills a minimum OCU allocation whether queried or not; standby replicas are mandatory for NEXTGEN collections, roughly doubling consumption |
+| Amazon OpenSearch Serverless | Bills a minimum OCU allocation whether queried or not (default min 2 / max 96 OCU; both tunable via `aoss_min_ocu` / `aoss_max_ocu` CDK context); standby replicas are mandatory for NEXTGEN collections, roughly doubling consumption |
 | NAT Gateway | One, always on |
 | ECS Fargate | One VKG service **per namespace** — scales with namespace count |
 

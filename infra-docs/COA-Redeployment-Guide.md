@@ -2,7 +2,9 @@
 
 How to redeploy the Context Ontology Accelerator into an AWS account it has run in before, and how to set the Neptune and OpenSearch Serverless sizes for a low-cost dev environment.
 
-Written against repo **v0.3.5** (commit `052b5a2`). Line numbers below refer to that version.
+Written against repo **v0.3.4** (mirror-sync commit `c84a304`) — the version this team is pinned to. Line numbers below refer to that version.
+
+> **Pinned on purpose.** `main` tracks ongoing development. Everything in section 4 is version-sensitive: the Neptune sizing knob changed after v0.3.4, so if you move to a newer tag, re-check section 4 before trusting it.
 
 ---
 
@@ -13,7 +15,7 @@ Written against repo **v0.3.5** (commit `052b5a2`). Line numbers below refer to 
 | Install toolchain (AWS CLI, Docker, Node, pnpm, uv, Java, Maven) | No |
 | Docker group / ARM64 emulation | No (re-run the `setfacl` workaround after a reboot if you used it) |
 | Bedrock model access, service quotas | No |
-| Clone the repo | No. Pull or check out the release you want instead (section 3). |
+| Clone the repo | No. Stay on the pinned tag unless you're deliberately upgrading (section 3). |
 | `cdk bootstrap` | Only if the `CDKToolkit` stack was deleted (section 2) |
 | SSM deploy config `/coa/config` | Only if it was deleted (section 2) |
 
@@ -30,11 +32,12 @@ export AWS_PROFILE=<iam-user-profile>
 export AWS_DEFAULT_REGION=us-east-1
 export CDK_DEFAULT_REGION=us-east-1
 export SCL_SMUS_ADMIN_ARNS=<sso-role-arn>      # arn:aws:iam::<acct>:role/aws-reserved/sso.amazonaws.com/...
-unset SCL_NEPTUNE_INSTANCE_CLASS              # let cdk.json decide (see 4.4)
 
 aws sts get-caller-identity                   # right account?
 docker ps                                     # Docker reachable without sudo?
 ```
+
+On v0.3.4 there is no `SCL_NEPTUNE_INSTANCE_CLASS` variable — `scripts/deploy.sh` doesn't read one (see 4.1), so there's nothing to unset. The variables `deploy.sh` does translate into CDK context are listed at `scripts/deploy.sh` lines 33–46.
 
 Check what's still in the account:
 
@@ -67,8 +70,8 @@ aws ssm put-parameter --name /coa/config --type String --overwrite \
 
 ```bash
 git fetch --tags
-git checkout v0.3.5                 # or the release you want; work on a branch if you change code
-git checkout -b dev-small-storage
+git checkout v0.3.4                 # the pinned version; see the note in section 4.2 before changing tags
+git checkout -b dev-small-storage   # the Neptune change in 4.2 is a code edit, so work on a branch
 
 make generate                       # Smithy codegen
 bash ./scripts/setup-dev.sh         # use bash: the script's #!/usr/bin/env sh breaks on Ubuntu's dash
@@ -80,24 +83,34 @@ If `pnpm -v` no longer prints 10.x afterwards, reinstall it with `sudo npm insta
 
 ## 4. Change the Neptune and OpenSearch size
 
+**On v0.3.4 the two knobs work differently, and this is the most important thing in this guide:**
+
+| | How you set it on v0.3.4 |
+| --- | --- |
+| OpenSearch Serverless OCU | CDK context — `infra/cdk.json` (4.3). No code change. |
+| Neptune instance class | **Code edit** — `storage-stack.ts` line 118 (4.2). There is no context override. |
+
+Putting `neptune_instance_class` in `cdk.json` on v0.3.4 does **nothing**: no code reads that key, CDK does not warn about unused context, and the deploy quietly creates a `db.r8g.large`. That is the expensive failure mode this section exists to prevent — you would believe you had shrunk Neptune and still be billed for `db.r8g.large`.
+
 ### 4.1 Where it lives in the code
 
-Both are in **`infra/lib/stacks/foundation/storage-stack.ts`**. In v0.3.5 both already read their size from CDK context, so you **don't need to edit this file**.
+Both live in **`infra/lib/stacks/foundation/storage-stack.ts`**.
 
-Neptune instance, around lines 113–130:
+Neptune instance, lines 113–121 — the class is a literal, with no `tryGetContext` call:
 
 ```ts
-const neptuneInstance = new neptune.CfnDBInstance(this, "NeptunePrimaryInstance", {
-  dbInstanceIdentifier: this.prefixed("neptune-primary"),
-  // Overridable via `--context neptune_instance_class=...` (local: `SCL_NEPTUNE_INSTANCE_CLASS`)
-  dbInstanceClass:
-    (this.node.tryGetContext("neptune_instance_class") as string) ??
-    "db.r8g.large",                                   // default when nothing is set
-  dbClusterIdentifier: neptuneCluster.dbClusterIdentifier!,
-});
+const neptuneInstance = new neptune.CfnDBInstance(
+  this,
+  "NeptunePrimaryInstance",
+  {
+    dbInstanceIdentifier: this.prefixed("neptune-primary"),
+    dbInstanceClass: "db.r8g.large",          // line 118 — hardcoded on v0.3.4
+    dbClusterIdentifier: neptuneCluster.dbClusterIdentifier!,
+  },
+);
 ```
 
-OpenSearch Serverless capacity, around lines 232–234:
+OpenSearch Serverless capacity, lines 222–224 — both read from context:
 
 ```ts
 const maxOcu = Number(this.node.tryGetContext("aoss_max_ocu") ?? 96);   // default max 96 OCU
@@ -105,9 +118,24 @@ const maxOcu = Number(this.node.tryGetContext("aoss_max_ocu") ?? 96);   // defau
 const minOcu = Number(this.node.tryGetContext("aoss_min_ocu") ?? 2);    // default min 2 OCU
 ```
 
-`scripts/deploy.sh` (line 45) also turns the `SCL_NEPTUNE_INSTANCE_CLASS` environment variable into `--context neptune_instance_class=...`. There's no matching variable for the OpenSearch settings.
+`scripts/deploy.sh` (lines 33–46) turns `SCL_*` environment variables into `--context` flags. There is **no** entry for Neptune or for the OpenSearch settings; the nearest neighbour is `SCL_LAMBDA_RESERVED_CONCURRENCY` → `lambda_reserved_concurrency` at line 43.
 
-### 4.2 Set the values in `infra/cdk.json` (recommended)
+### 4.2 Neptune: edit the file (one-line change)
+
+```bash
+# infra/lib/stacks/foundation/storage-stack.ts, line 118
+-        dbInstanceClass: "db.r8g.large",
++        dbInstanceClass: "db.t4g.medium",
+```
+
+Two things to know before you commit it:
+
+- **One unit test fails.** `infra/test/foundation/storage-stack.test.ts` line 66 is `it("creates a Neptune instance with r8g.large")` and asserts `DBInstanceClass: "db.r8g.large"` at line 69. Either update that expectation in the same commit, or expect `pnpm nx run infra:test` (and so `make test`) to fail on exactly that test. It does not block the deploy.
+- **Keep it on a branch** (`dev-small-storage` from section 3), so pulling a future tag shows it as a conflict you must re-decide rather than silently losing it.
+
+If you'd rather not carry a code change, the alternative is to backport the newer context lookup — but that is a larger edit to a pinned branch, and this one line is the smaller risk.
+
+### 4.3 OpenSearch: set the values in `infra/cdk.json`
 
 Values in `cdk.json` apply to every `cdk` command, so `make deploy-dev` and `make destroy-dev` both see them.
 
@@ -118,31 +146,25 @@ Values in `cdk.json` apply to every `cdk` command, so `make deploy-dev` and `mak
     "env": "dev",
     "//": "Emit templates without indentation. ... (leave this text as it is)",
     "@aws-cdk/core:suppressTemplateIndentation": true,
-    "neptune_instance_class": "db.t4g.medium",
     "aoss_min_ocu": 0,
     "aoss_max_ocu": 4
   }
 }
 ```
 
-Put a comma after each entry except the last.
+Put a comma after each entry except the last. Leave the existing `env`, `//` and `@aws-cdk/core:suppressTemplateIndentation` entries alone — the indentation setting is what keeps the API stack's template under CloudFormation's 1,000,000-byte limit. **Do not add `neptune_instance_class` here** (see the top of section 4).
 
-### 4.3 Choosing the values
+### 4.4 Choosing the values
 
 | Setting | Default | Low-cost dev | Notes |
 | --- | --- | --- | --- |
-| `neptune_instance_class` | `db.r8g.large` | `db.t4g.medium` | Smallest Neptune class (burstable, 4 GB). Fine for small dev graphs. CPU use above the baseline is billed as burst credits. If it's rejected, try `db.t3.medium`. Heavy concurrent SPARQL can run out of memory even on `db.r8g.large`. |
-| `aoss_min_ocu` | `2` | `0` | Valid: 0, 2, 4, 8, 16, or multiples of 16. With `0` the collection scales to zero when idle. The first query after idle takes about 10 s, and bulk ingestion can be throttled (HTTP 429), which fails the ingest loudly. Use `2` for ingest-heavy work. |
-| `aoss_max_ocu` | `96` | `4` | Cost cap. Valid: 2, 4, 8, 16, or multiples of 16. Must be ≥ min. Raise to `8` if ingestion keeps getting throttled. |
+| Neptune class (code edit, 4.2) | `db.r8g.large` | `db.t4g.medium` | Smallest Neptune class (burstable, 4 GB). Fine for small dev graphs. CPU above the baseline is billed as burst credits. If it's rejected, try `db.t3.medium`. Heavy concurrent SPARQL can run out of memory even on `db.r8g.large`. |
+| `aoss_min_ocu` | `2` | `0` | Valid: 0, 2, 4, 8, 16, or a multiple of 16, up to 1696. With `0` the collection scales to zero when idle. The first query after idle takes about 10 s, and bulk ingestion can be throttled (HTTP 429), which fails the ingest loudly rather than silently half-writing. Use `2` for ingest-heavy work. |
+| `aoss_max_ocu` | `96` | `4` | Cost cap. Same valid set as min, except it cannot be `0`, and must be ≥ min. Raise to `8` if ingestion keeps getting throttled. |
 
-You can't turn off OpenSearch standby replicas: AWS requires them for NEXTGEN collections.
+Both OCU values are validated at **synth time** (`storage-stack.ts` lines 245–268), so a bad number — `3`, `6`, negative, or min above max — fails immediately with a readable error instead of after a slow CloudFormation update. `aoss_min_ocu: 0` additionally emits a synth warning (`AOSS min OCU is 0: indexing capacity can scale to zero…`); that warning is expected and is not an error.
 
-### 4.4 Avoid the empty-value trap
-
-A `--context` flag on the command line overrides `cdk.json`. If you pass `--context neptune_instance_class=$SCL_NEPTUNE_INSTANCE_CLASS` while the variable is unset, the value becomes **empty** and synth warns `DBInstanceClass: '' is not valid`.
-
-- **Using `cdk.json`:** keep `SCL_NEPTUNE_INSTANCE_CLASS` unset and don't pass that flag.
-- **Using the variable instead:** set it to a real value before running `make deploy-dev` (`export SCL_NEPTUNE_INSTANCE_CLASS=db.t4g.medium`). `deploy.sh` only adds the flag when the variable isn't empty.
+You can't turn off OpenSearch standby replicas: AWS requires `standbyReplicas: ENABLED` for NEXTGEN collections, and the stack hardcodes it.
 
 ### 4.5 Verify before deploying
 
@@ -156,7 +178,7 @@ grep -o '"DBInstanceClass":"[^"]*"\|"MinIndexingCapacityInOcu":[0-9]*\|"MaxIndex
   infra/cdk.out/coa-dev-storage.template.json
 ```
 
-Expected:
+Expected, with the 4.2 edit applied and the 4.3 context set:
 
 ```text
 "DBInstanceClass":"db.t4g.medium"
@@ -164,9 +186,9 @@ Expected:
 "MaxIndexingCapacityInOcu":4
 ```
 
-The warning `AOSS min OCU is 0: indexing capacity can scale to zero…` is expected with `aoss_min_ocu: 0`. The deprecated-API warnings are harmless.
+**If `DBInstanceClass` still says `db.r8g.large`**, the 4.2 file edit isn't in place — check that you didn't instead add `neptune_instance_class` to `cdk.json`, which has no effect on v0.3.4.
 
-`make test` may fail the storage-stack unit test that expects the default size. That doesn't block the deploy.
+The deprecated-API warnings are harmless. `grep` works on one line because templates are emitted unindented (4.3).
 
 ---
 
@@ -196,6 +218,8 @@ aws cloudformation describe-stacks --stack-name coa-dev-auth --query "Stacks[0].
 aws neptune describe-db-instances --query "DBInstances[?starts_with(DBInstanceIdentifier,'coa-dev')].[DBInstanceIdentifier,DBInstanceClass]" --output table
 ```
 
+Run that last command every time. It is the only check that proves which Neptune class you are paying for.
+
 Sign in at `WebAppUrl` with `initialAdminEmail` and the temporary password Cognito emails you. That user is in the `Admin` group, which maps to `platform-admin`.
 
 ---
@@ -207,10 +231,12 @@ make destroy-dev                     # same variables and cdk.json as the deploy
 # non-interactive: SCL_DESTROY_YES=1 make destroy-dev
 ```
 
-Order: cleanup API calls first (AgentCore runtimes, VKG ECS services, Cloud Map services, DataZone domain, connector stack), then `cdk destroy --all` in reverse dependency order.
+`scripts/destroy.sh` runs seven steps, in this order: delete the AgentCore Runtimes → **wait for their ENIs to detach** → delete the VKG ECS services → delete the Cloud Map services → force-delete the DataZone domain → delete the connector stacks → `cdk destroy --all`. Steps 1–6 clear resources CloudFormation doesn't fully own; they are idempotent, so re-running after an early exit picks up where it left off.
 
-- **`DependencyViolation` on the `mcp` or `serve` stacks:** AgentCore is still releasing its network interfaces. Wait a few hours and rerun `make destroy-dev`.
+- **It can stop at step 2 by design.** AgentCore releases its network interfaces outside CloudFormation. If they haven't detached within `SCL_ENI_WAIT_MAX_SECONDS` (default 600), the script stops there rather than walking into a `DependencyViolation` on `DeleteSecurityGroup`. That is the expected outcome, not a hang — wait and rerun `make destroy-dev`. In practice this can take hours.
+- **`DependencyViolation` on the `mcp` or `serve` stacks:** same cause. Wait, then rerun.
 - **Not removed:** the `CDKToolkit` stack and `/coa/config`. Keep both if you'll redeploy. That saves the bootstrap and lets unchanged images be skipped.
+- Teardown deletes Neptune and OpenSearch data permanently.
 
 ---
 
@@ -220,10 +246,11 @@ Order: cleanup API calls first (AgentCore runtimes, VKG ECS services, Cloud Map 
 | --- | --- |
 | `permission denied ... docker.sock` | `newgrp docker`, or `sudo setfacl -m user:$(whoami):rw /var/run/docker.sock` (resets on reboot) |
 | `make setup` fails with `EACCES` on `npm install -g pnpm` | Run `bash ./scripts/setup-dev.sh` instead of `sh` |
-| Synth: `DBInstanceClass: '' is not valid` | Empty context value. See 4.4. |
-| Preflight: `no IAM role named 'Admin'` | Export `SCL_SMUS_ADMIN_ARNS` |
+| Neptune deployed as `db.r8g.large` after you set `cdk.json` | Expected on v0.3.4 — `neptune_instance_class` isn't read. Apply the code edit in 4.2. |
+| Synth: `aoss_min_ocu=<n> is invalid` / `cannot exceed aoss_max_ocu` | Out-of-range OCU value. Use 0, 2, 4, 8, 16, or a multiple of 16 (max ≥ 2 and ≥ min). See 4.4. |
+| `No SMUS admin principal configured, and IAM confirmed that account … has no role named 'Admin'` | Export `SCL_SMUS_ADMIN_ARNS`. Raised by `scripts/check-smus-admin-principal.sh`, which `deploy.sh` runs before CDK. |
 | `ExpiredToken` partway through | Refresh credentials, rerun `make deploy-dev` |
 | Namespace stack: `Domain name already exists` (409) | `aws datazone delete-domain --identifier <id> --skip-deletion-check`, delete the failed stack, redeploy |
 | Lambda reserved concurrency rejected | `export SCL_LAMBDA_RESERVED_CONCURRENCY=0` |
 
-Sources: repo `external-docs/content/deploying.md`, `getting-started.md`, `infra/lib/stacks/foundation/storage-stack.ts`, `scripts/deploy.sh`, `scripts/destroy.sh` (v0.3.5); [Amazon Neptune pricing](https://aws.amazon.com/neptune/pricing/).
+Sources, all at v0.3.4 (`c84a304`): `infra/lib/stacks/foundation/storage-stack.ts`, `infra/test/foundation/storage-stack.test.ts`, `infra/cdk.json`, `scripts/deploy.sh`, `scripts/destroy.sh`, `scripts/check-smus-admin-principal.sh`, plus repo `external-docs/content/deploying.md` and `getting-started.md`; [Amazon Neptune pricing](https://aws.amazon.com/neptune/pricing/).

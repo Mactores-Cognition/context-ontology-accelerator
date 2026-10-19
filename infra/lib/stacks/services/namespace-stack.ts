@@ -40,6 +40,11 @@ export interface NamespaceStackProps extends cdk.StackProps {
   readonly vkgClusterArn?: string;
   /** Cloud Map namespace ID (for teardown on namespace delete). */
   readonly cloudMapNamespaceId?: string;
+  /**
+   * VKG listener ARN on the internal services ALB (for teardown on namespace
+   * delete). Used instead of cloudMapNamespaceId with `service_discovery=alb`.
+   */
+  readonly vkgListenerArn?: string;
   /** Ontology S3 bucket name (for artifact cleanup on namespace delete). */
   readonly ontologyBucketName?: string;
   /**
@@ -357,6 +362,7 @@ export class NamespaceStack extends SCLStack {
           : undefined,
         vkgClusterArn: props.vkgClusterArn,
         cloudMapNamespaceId: props.cloudMapNamespaceId,
+        vkgListenerArn: props.vkgListenerArn,
         ontologyBucketName: props.ontologyBucketName,
         ontologyEngineEndpoint: props.ontologyEngineEndpoint,
         // For dropping the namespace's GraphRAG doc-KG indexes on teardown.

@@ -12,7 +12,12 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { Construct } from "constructs";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
-import { resolveContext, namespaceTagKey } from "../../context";
+import {
+  isAlbServiceDiscovery,
+  resolveContext,
+  namespaceTagKey,
+  SERVICE_DISCOVERY_ALB,
+} from "../../context";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
 import { parseEcrImageUri } from "../../utils/ecr-utils";
@@ -485,6 +490,11 @@ export class ServeStack extends SCLStack {
           AWS_REGION: region,
           NEPTUNE_ENDPOINT: props.neptuneEndpoint,
           VKG_ENDPOINT: props.vkgEndpoint,
+          // Internal ALB: keep VKG_ENDPOINT and send the namespace in the
+          // X-Coa-Namespace header instead of rewriting the hostname.
+          ...(isAlbServiceDiscovery(this.node) && {
+            SERVICE_DISCOVERY_BACKEND: SERVICE_DISCOVERY_ALB,
+          }),
           OPENSEARCH_ENDPOINT: opensearchEndpoint,
           // TODO(aoss-proxy): Remove when AgentCore supports AOSS directly
           OPENSEARCH_PROXY_LAMBDA_ARN: aossProxyFn.functionArn,

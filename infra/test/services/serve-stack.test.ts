@@ -944,3 +944,23 @@ describe("ServeStack - parameter read is deliberately broad", () => {
     ).toBe(true);
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): the runtime keeps
+// VKG_ENDPOINT as is and sends each namespace as a header instead of rewriting
+// the hostname, so it must know the mode.
+describe("ServeStack - service discovery mode", () => {
+  const envOf = (template: Template): Record<string, unknown> => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    return Object.values(runtimes)[0].Properties.EnvironmentVariables;
+  };
+
+  it("ALB mode: tells the runtime to route VKG calls by header", () => {
+    expect(envOf(createStack({ service_discovery: "alb" }))).toMatchObject({
+      SERVICE_DISCOVERY_BACKEND: "alb",
+    });
+  });
+
+  it("default mode: omits the variable", () => {
+    expect(envOf(createStack())).not.toHaveProperty("SERVICE_DISCOVERY_BACKEND");
+  });
+});

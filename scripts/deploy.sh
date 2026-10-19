@@ -32,6 +32,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Table-metadata store (default DataZone). dynamodb stores it in a DynamoDB
 # table and deploys no DataZone domain, so no SMUS admin principal is needed:
 #   SCL_METADATA_STORE=dynamodb make deploy-dev
+# Service discovery for ontology-engine and VKG (default Cloud Map). alb puts
+# them behind one internal ALB instead (for accounts without Cloud Map):
+#   SCL_SERVICE_DISCOVERY=alb make deploy-dev
 CONTEXT="--context env=$ENV"
 [ -n "${SCL_PREFIX:-}" ]        && CONTEXT="$CONTEXT --context resource_prefix=$SCL_PREFIX"
 [ -n "${SCL_PROJECT_TAG:-}" ]   && CONTEXT="$CONTEXT --context project_tag=$SCL_PROJECT_TAG"
@@ -48,6 +51,7 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand_max_tables=$SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES"
 [ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="$CONTEXT --context smus_admin_principal_arns=$SCL_SMUS_ADMIN_ARNS"
 [ -n "${SCL_METADATA_STORE:-}" ] && CONTEXT="$CONTEXT --context metadata_store=$SCL_METADATA_STORE"
+[ -n "${SCL_SERVICE_DISCOVERY:-}" ] && CONTEXT="$CONTEXT --context service_discovery=$SCL_SERVICE_DISCOVERY"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
 # NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when

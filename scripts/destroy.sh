@@ -26,6 +26,10 @@
 #      own namespace-delete flow cleans these up
 #      (namespace-deletion-pipeline.ts), but this script never takes that
 #      path, so anything left behind has to be cleared here.
+#      With service_discovery=alb there is no Cloud Map namespace; instead
+#      the reload Lambda added one listener rule + target group per
+#      namespace on the internal services ALB. CFN deletes the ALB and its
+#      listeners but not those target groups, so they are removed here too.
 #   5. Force-delete the DataZone domain via
 #      `delete-domain --skip-deletion-check`, which cascades to every
 #      project, asset, and asset type under it. CFN's own DeleteProject
@@ -325,7 +329,54 @@ fi
 # ── Step 4: Delete Cloud Map services (CFN owns the namespace, not the
 # services registered inside it) ──────────────────────────────────────────
 echo ""
-echo "=== Step 4/7: Delete Cloud Map services ==="
+echo "=== Step 4/7: Delete Cloud Map services / internal ALB routes ==="
+
+# Internal ALB mode (service_discovery=alb): found through the listener ARN
+# VkgStack publishes; absent for Cloud Map deployments. Each rule is deleted
+# before its target group, which cannot be deleted while a rule forwards to it
+# (and stays in use until ECS finishes deregistering the tasks from Step 3).
+VKG_LISTENER_ARN=$(aws ssm get-parameter --name "${SSM_PREFIX}/vkg/listener-arn" \
+  --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+if [ -z "$VKG_LISTENER_ARN" ] || [ "$VKG_LISTENER_ARN" == "None" ]; then
+  ok "No VKG listener in SSM — not an internal-ALB deployment."
+else
+  info "VKG listener $VKG_LISTENER_ARN (internal services ALB)"
+  ALB_FAILED=0
+  while IFS=$'\t' read -r RULE_ARN TG_ARN; do
+    [ -z "$RULE_ARN" ] && continue
+    if ! aws elbv2 delete-rule --region "$REGION" --rule-arn "$RULE_ARN" >/dev/null 2>&1; then
+      warn "delete-rule failed for $RULE_ARN"
+      ALB_FAILED=$((ALB_FAILED + 1))
+      continue
+    fi
+    ok "Deleted listener rule $(arn_id "$RULE_ARN")"
+    if [ -z "$TG_ARN" ] || [ "$TG_ARN" == "None" ]; then
+      continue
+    fi
+    for ATTEMPT in 1 2 3 4 5 6; do
+      if aws elbv2 delete-target-group --region "$REGION" \
+          --target-group-arn "$TG_ARN" >/dev/null 2>&1; then
+        ok "Deleted target group $(arn_id "$TG_ARN")"
+        break
+      fi
+      if [ "$ATTEMPT" -eq 6 ]; then
+        warn "Target group $TG_ARN still in use after 60s — delete it by hand later."
+        ALB_FAILED=$((ALB_FAILED + 1))
+      else
+        info "  target group still in use, waiting 10s..."
+        sleep 10
+      fi
+    done
+  done < <(aws elbv2 describe-rules --region "$REGION" --listener-arn "$VKG_LISTENER_ARN" \
+    --query 'Rules[?IsDefault==`false`].[RuleArn, Actions[0].TargetGroupArn]' \
+    --output text 2>/dev/null)
+  if [ "$ALB_FAILED" -gt 0 ]; then
+    warn "$ALB_FAILED VKG rule(s)/target group(s) could not be deleted. They do not"
+    warn "block 'cdk destroy', but leftover target groups count toward the quota."
+  else
+    ok "All per-namespace VKG rules and target groups removed."
+  fi
+fi
 
 # Scoped by namespace NAME, which carries the prefix and env
 # (`${this.prefixed("services")}.local` in network-stack.ts). Service names

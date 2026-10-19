@@ -612,3 +612,111 @@ describe("OntologyStack in DynamoDB mode (metadata_store=dynamodb)", () => {
     });
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): ontology-engine is
+// the default action of an ALB listener on its container port, and every
+// endpoint points at the ALB. Default mode is covered by the suites above.
+describe("OntologyStack in ALB mode (service_discovery=alb)", () => {
+  function renderAlb(context: Record<string, unknown>, id: string): Template {
+    const app = new cdk.App({ context: { ...TEST_CONTEXT, ...context } });
+    const network = new NetworkStack(app, `${id}Network`);
+    return Template.fromStack(
+      new OntologyStack(app, id, {
+        network,
+        serviceNamespace: network.serviceNamespace,
+        neptuneClusterArn:
+          "arn:aws:neptune-db:us-east-1:123456789012:cluster-abc123/*",
+        neptuneClusterEndpoint:
+          "test-neptune.cluster-abc.us-east-1.neptune.amazonaws.com",
+        ontologyArtifactsBucket: cdk.aws_s3.Bucket.fromBucketName(
+          network,
+          `${id}ArtifactsBucket`,
+          "coa-dev-ontology-artifacts-123456789012",
+        ),
+        smusDomainId: "dzd-test123",
+        allowedOrigin: "https://test.example.com",
+      }),
+    );
+  }
+
+  let template: Template;
+  beforeAll(() => {
+    template = renderAlb({ service_discovery: "alb" }, "AlbOntology");
+  });
+
+  const ssmValue = (t: Template, name: string): string => {
+    const params = t.findResources("AWS::SSM::Parameter", {
+      Properties: { Name: name },
+    });
+    const [param] = Object.values(params) as any[];
+    expect(param).toBeDefined();
+    return JSON.stringify(param.Properties.Value);
+  };
+
+  test("ALB mode: ECS service registers with a load balancer, not Cloud Map", () => {
+    const services = Object.values(
+      template.findResources("AWS::ECS::Service"),
+    ) as any[];
+    expect(services).toHaveLength(1);
+    const props = services[0].Properties;
+    expect(props.ServiceRegistries).toBeUndefined();
+    expect(props.LoadBalancers).toEqual([
+      expect.objectContaining({ ContainerPort: 8001 }),
+    ]);
+    expect(props.HealthCheckGracePeriodSeconds).toBeGreaterThanOrEqual(90);
+  });
+
+  test("ALB mode: listener on 8001 forwards to an IP target group with /health checks", () => {
+    template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8001,
+      Protocol: "HTTP",
+      DefaultActions: [Match.objectLike({ Type: "forward" })],
+    });
+    template.hasResourceProperties("AWS::ElasticLoadBalancingV2::TargetGroup", {
+      Port: 8001,
+      Protocol: "HTTP",
+      TargetType: "ip",
+      HealthCheckPath: "/health",
+      TargetGroupAttributes: Match.arrayWith([
+        { Key: "deregistration_delay.timeout_seconds", Value: "30" },
+      ]),
+    });
+  });
+
+  test("ALB mode: endpoint SSM parameter and api-proxy env point at the ALB", () => {
+    const endpoint = ssmValue(template, "/coa/ontology-engine/endpoint");
+    expect(endpoint).not.toContain("services.local");
+    expect(endpoint).toContain("DNSName");
+
+    const fns = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ) as any[];
+    const proxy = fns.find(
+      (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    expect(proxy).toBeDefined();
+    const proxyEndpoint = JSON.stringify(
+      proxy.Properties.Environment.Variables.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    expect(proxyEndpoint).not.toContain("services.local");
+    expect(proxyEndpoint).toContain("DNSName");
+  });
+
+  test("ALB mode: publishes no Cloud Map namespace ARN", () => {
+    expect(
+      Object.keys(
+        template.findResources("AWS::SSM::Parameter", {
+          Properties: { Name: "/coa/ontology-engine/service-namespace-arn" },
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("default mode: no listener or target group; Cloud Map registration stays", () => {
+    const def = renderAlb({}, "DefaultOntology");
+    def.resourceCountIs("AWS::ElasticLoadBalancingV2::Listener", 0);
+    def.resourceCountIs("AWS::ElasticLoadBalancingV2::TargetGroup", 0);
+    const [svc] = Object.values(def.findResources("AWS::ECS::Service")) as any[];
+    expect(svc.Properties.ServiceRegistries).toHaveLength(1);
+  });
+});

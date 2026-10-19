@@ -45,8 +45,10 @@ import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { Construct } from "constructs";
 import { TABLE_NAMES } from "@coa/shared";
 import {
+  isAlbServiceDiscovery,
   isDynamoDbMetadataStore,
   METADATA_STORE_DYNAMODB,
+  SERVICE_DISCOVERY_ALB,
 } from "../../context";
 
 export interface NamespaceDeletionPipelineProps {
@@ -103,6 +105,13 @@ export interface NamespaceDeletionPipelineProps {
   readonly namespaceApiFnRoleArn?: string;
   readonly vkgClusterArn?: string;
   readonly cloudMapNamespaceId?: string;
+  /**
+   * VKG listener ARN on the internal services ALB. With
+   * `service_discovery=alb` DeletePlatform removes the namespace's listener
+   * rule and target group instead of its Cloud Map service, and
+   * cloudMapNamespaceId is ignored.
+   */
+  readonly vkgListenerArn?: string;
   readonly ontologyBucketName?: string;
   readonly ontologyEngineEndpoint?: string;
   readonly resourcePrefix: string;
@@ -135,6 +144,12 @@ export class NamespaceDeletionPipeline extends Construct {
       ? undefined
       : props.namespaceApiFnRoleArn;
     const metadataAssetsTableName = props.prefixed(TABLE_NAMES.METADATA_ASSETS);
+
+    // With the internal ALB there is no Cloud Map service to delete: the
+    // namespace's VKG listener rule and target group go instead.
+    const albMode = isAlbServiceDiscovery(this.node);
+    const cloudMapNamespaceId = albMode ? undefined : props.cloudMapNamespaceId;
+    const vkgListenerArn = albMode ? props.vkgListenerArn : undefined;
 
     const commonLambdaProps = {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -282,8 +297,12 @@ export class NamespaceDeletionPipeline extends Construct {
           METADATA_STORE_TABLE: metadataAssetsTableName,
         }),
         ...(props.vkgClusterArn && { VKG_CLUSTER_ARN: props.vkgClusterArn }),
-        ...(props.cloudMapNamespaceId && {
-          CLOUD_MAP_NAMESPACE_ID: props.cloudMapNamespaceId,
+        ...(cloudMapNamespaceId && {
+          CLOUD_MAP_NAMESPACE_ID: cloudMapNamespaceId,
+        }),
+        ...(vkgListenerArn && {
+          SERVICE_DISCOVERY_BACKEND: SERVICE_DISCOVERY_ALB,
+          VKG_LISTENER_ARN: vkgListenerArn,
         }),
       },
     });
@@ -339,7 +358,31 @@ export class NamespaceDeletionPipeline extends Construct {
         }),
       );
     }
-    if (props.cloudMapNamespaceId) {
+    if (vkgListenerArn) {
+      const partition = cdk.Stack.of(this).partition;
+      deletePlatformFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "elasticloadbalancing:DescribeRules",
+            "elasticloadbalancing:DescribeTargetGroups",
+          ],
+          resources: ["*"],
+        }),
+      );
+      deletePlatformFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "elasticloadbalancing:DeleteRule",
+            "elasticloadbalancing:DeleteTargetGroup",
+          ],
+          resources: [
+            `arn:${partition}:elasticloadbalancing:${region}:${account}:listener-rule/app/*`,
+            `arn:${partition}:elasticloadbalancing:${region}:${account}:targetgroup/vkg-*/*`,
+          ],
+        }),
+      );
+    }
+    if (cloudMapNamespaceId) {
       deletePlatformFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: [

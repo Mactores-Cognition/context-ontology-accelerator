@@ -799,3 +799,48 @@ describe("NamespaceStack in DynamoDB mode (metadata_store=dynamodb)", () => {
     });
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): the VKG listener
+// ARN reaches the deletion pipeline so namespace delete can remove the
+// namespace's listener rule and target group.
+describe("NamespaceStack in ALB mode (service_discovery=alb)", () => {
+  test("ALB mode: DeletePlatform gets the VKG listener ARN and no Cloud Map namespace", () => {
+    const listenerArn =
+      "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/coa-svc/abc/def";
+    const app = new cdk.App({
+      context: { ...TEST_CONTEXT, service_discovery: "alb" },
+    });
+    const depStack = new cdk.Stack(app, "AlbDepStack");
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+      allowAllOutbound: true,
+    });
+    const rolesTable = new dynamodb.Table(depStack, "Roles", {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    });
+    const rrmTable = new dynamodb.Table(depStack, "RRM", {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    });
+    const tpl = Template.fromStack(
+      new NamespaceStack(app, "TestNamespaceAlb", {
+        vpc,
+        lambdaSecurityGroup,
+        rolesTable,
+        resourceRoleMappingsTable: rrmTable,
+        vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/coa-test-vkg",
+        vkgListenerArn: listenerArn,
+      }),
+    );
+    const fn = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp("ns-deletion-platform$") },
+      }),
+    )[0] as any;
+    expect(fn).toBeDefined();
+    const vars = fn.Properties.Environment.Variables;
+    expect(vars.VKG_LISTENER_ARN).toBe(listenerArn);
+    expect(vars.SERVICE_DISCOVERY_BACKEND).toBe("alb");
+    expect(vars).not.toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+  });
+});

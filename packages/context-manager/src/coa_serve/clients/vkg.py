@@ -29,6 +29,11 @@ logger = structlog.get_logger(__name__)
 DEFAULT_RETRIES = 3
 DEFAULT_TIMEOUT = 30.0
 
+# Behind the internal services ALB (SERVICE_DISCOVERY_BACKEND=alb) every
+# namespace's VKG service shares one address; the ALB's listener rules route on
+# this header. Must match infra/lambda/vkg-reload/index.py.
+VKG_NAMESPACE_HEADER = "X-Coa-Namespace"
+
 
 @dataclass(frozen=True)
 class SparqlProjection:
@@ -67,6 +72,7 @@ class VKGClient:
         base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_RETRIES,
+        headers: dict[str, str] | None = None,
     ):
         """Configure the VKG Service base URL, request timeout, and retry budget.
 
@@ -74,6 +80,8 @@ class VKGClient:
             base_url: VKG Service base URL. Defaults to the ``VKG_SERVICE_URL`` env var.
             timeout: Per-request timeout in seconds.
             max_retries: Maximum retry attempts for transient errors.
+            headers: Extra headers sent on every request (e.g. ``X-Coa-Namespace``
+                behind the internal services ALB).
 
         Raises:
             ValueError: If no base URL is provided via arg or env var.
@@ -83,11 +91,12 @@ class VKGClient:
             raise ValueError("VKG Service URL must be provided via constructor arg or VKG_SERVICE_URL env var")
         self._timeout = timeout
         self._max_retries = max_retries
+        self._headers = dict(headers or {})
         self._http: httpx.AsyncClient | None = None
 
     async def _get_http(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout)
+            self._http = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout, headers=self._headers)
         return self._http
 
     async def close(self) -> None:

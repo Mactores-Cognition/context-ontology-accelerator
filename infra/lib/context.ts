@@ -112,6 +112,21 @@ export function isDynamoDbMetadataStore(node: Node): boolean {
   return node.tryGetContext(CTX_METADATA_STORE) === METADATA_STORE_DYNAMODB;
 }
 
+/** CDK context key that selects how callers reach ontology-engine and VKG. */
+export const CTX_SERVICE_DISCOVERY = "service_discovery";
+
+/**
+ * `service_discovery` value that puts ontology-engine and the per-namespace VKG
+ * services behind one internal ALB instead of Cloud Map private DNS. Any other
+ * value, or none, keeps Cloud Map.
+ */
+export const SERVICE_DISCOVERY_ALB = "alb";
+
+/** True when the `service_discovery` context selects the internal ALB. */
+export function isAlbServiceDiscovery(node: Node): boolean {
+  return node.tryGetContext(CTX_SERVICE_DISCOVERY) === SERVICE_DISCOVERY_ALB;
+}
+
 /** Return `{prefix}-{env}-{name}`. */
 export function prefixed(node: Node, name: string): string {
   const { prefix, envName } = resolveContext(node);

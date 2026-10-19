@@ -456,3 +456,77 @@ describe("NamespaceDeletionPipeline in DynamoDB mode (metadata_store=dynamodb)",
     }
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): DeletePlatform
+// removes the namespace's VKG listener rule and target group instead of its
+// Cloud Map service.
+describe("NamespaceDeletionPipeline in ALB mode (service_discovery=alb)", () => {
+  const LISTENER_ARN =
+    "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/coa-svc/abc/def";
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App({ context: { service_discovery: "alb" } });
+    const stack = new cdk.Stack(app, "AlbStack");
+    const vpc = new ec2.Vpc(stack, "Vpc");
+    const table = (id: string) =>
+      new dynamodb.Table(stack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+    new NamespaceDeletionPipeline(stack, "DeletionPipeline", {
+      prefixed: (name: string) => `coa-dev-${name}`,
+      lambdaCode: lambda.Code.fromInline("def handler(event, context): pass"),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      namespacesTable: table("Namespaces"),
+      resourceRoleMappingsTable: table("RRM"),
+      rolesTable: table("Roles"),
+      sourcesApiFnName: "coa-dev-sources-api",
+      metricApiFnName: "coa-dev-metric-api",
+      datazoneDomainId: "dzd-123",
+      namespaceApiFnRoleArn:
+        "arn:aws:iam::123456789012:role/coa-dev-namespace-api",
+      vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/vkg",
+      cloudMapNamespaceId: "ns-abc123",
+      vkgListenerArn: LISTENER_ARN,
+      ontologyBucketName: "coa-dev-ontology-artifacts",
+      resourcePrefix: "coa-dev-",
+    });
+    template = Template.fromStack(stack);
+  });
+
+  const deletePlatform = (): any =>
+    Object.values(
+      template.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: "coa-dev-ns-deletion-platform" },
+      }),
+    )[0];
+  const deletePlatformActions = (): string[] =>
+    Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((p: any) =>
+        (p.Properties.PolicyName as string).includes("DeletePlatformFn"),
+      )
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+
+  test("ALB mode: DeletePlatformFn gets the listener ARN and the mode, not the Cloud Map namespace", () => {
+    const vars = deletePlatform().Properties.Environment.Variables;
+    expect(vars.VKG_LISTENER_ARN).toBe(LISTENER_ARN);
+    expect(vars.SERVICE_DISCOVERY_BACKEND).toBe("alb");
+    expect(vars).not.toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+  });
+
+  test("ALB mode: DeletePlatformFn may delete rules and target groups, and has no servicediscovery actions", () => {
+    const all = deletePlatformActions();
+    for (const action of [
+      "elasticloadbalancing:DescribeRules",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DeleteRule",
+      "elasticloadbalancing:DeleteTargetGroup",
+    ]) {
+      expect(all).toContain(action);
+    }
+    expect(all.filter((a) => a.startsWith("servicediscovery:"))).toEqual([]);
+    expect(all).toContain("ecs:DeleteService");
+  });
+});

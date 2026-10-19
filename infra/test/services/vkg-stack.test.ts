@@ -469,3 +469,108 @@ describe("VkgStack", () => {
     });
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): VKG gets a listener
+// whose per-namespace rules the reload Lambda adds at runtime (header
+// X-Coa-Namespace). Unknown or missing namespaces get a fixed 404.
+describe("VkgStack in ALB mode (service_discovery=alb)", () => {
+  let template: Template;
+  beforeAll(() => {
+    template = renderVkgWithContext({ service_discovery: "alb" });
+  });
+
+  const reloadEnv = (t: Template): Record<string, unknown> => {
+    const fns = Object.values(t.findResources("AWS::Lambda::Function")) as any[];
+    const reload = fns.find((f) =>
+      String(f.Properties.FunctionName ?? "").endsWith("vkg-reload"),
+    );
+    expect(reload).toBeDefined();
+    return reload.Properties.Environment.Variables;
+  };
+  const actions = (t: Template): string[] =>
+    Object.values(t.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+
+  test("ALB mode: listener on 8080 answers unknown namespaces with a fixed 404", () => {
+    template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8080,
+      Protocol: "HTTP",
+      DefaultActions: [
+        Match.objectLike({
+          Type: "fixed-response",
+          FixedResponseConfig: Match.objectLike({ StatusCode: "404" }),
+        }),
+      ],
+    });
+  });
+
+  test("ALB mode: reload Lambda gets the ALB settings instead of the Cloud Map namespace", () => {
+    const env = reloadEnv(template);
+    expect(env.SERVICE_DISCOVERY_BACKEND).toBe("alb");
+    expect(env.VKG_LISTENER_ARN).toBeDefined();
+    expect(env.VPC_ID).toBeDefined();
+    expect(env).not.toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+  });
+
+  test("ALB mode: reload Lambda may manage target groups and rules, and has no servicediscovery actions", () => {
+    const all = actions(template);
+    for (const action of [
+      "elasticloadbalancing:CreateTargetGroup",
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:CreateRule",
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:DescribeRules",
+      "elasticloadbalancing:DescribeTargetGroups",
+    ]) {
+      expect(all).toContain(action);
+    }
+    expect(all.filter((a) => a.startsWith("servicediscovery:"))).toEqual([]);
+  });
+
+  test("ALB mode: endpoint SSM parameter points at the ALB and the listener ARN is published", () => {
+    const [endpoint] = Object.values(
+      template.findResources("AWS::SSM::Parameter", {
+        Properties: { Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/endpoint` },
+      }),
+    ) as any[];
+    const value = JSON.stringify(endpoint.Properties.Value);
+    expect(value).not.toContain("services.local");
+    expect(value).toContain("DNSName");
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/listener-arn`,
+    });
+  });
+
+  test("ALB mode: no direct VPC-wide 8080 ingress to the ECS tasks (traffic comes through the ALB)", () => {
+    // CDK writes a rule on the shared ECS SG into the SG's own stack (network),
+    // so build both and inspect the network template.
+    const ecsSgRulesFromVpc = (context: Record<string, unknown>): any[] => {
+      const app = new cdk.App({ context: { ...TEST_CONTEXT, ...context } });
+      const network = new NetworkStack(app, "SgNetwork");
+      const bucketStack = new cdk.Stack(app, "SgBucketStack");
+      new VkgStack(app, "SgVkg", {
+        network,
+        serviceNamespace: network.serviceNamespace,
+        ontologyBucket: new s3.Bucket(bucketStack, "OntologyBucket"),
+      });
+      const net = Template.fromStack(network);
+      const sgs = net.findResources("AWS::EC2::SecurityGroup");
+      const ecsSgId = Object.keys(sgs).find((k) =>
+        (sgs[k].Properties.GroupDescription as string).startsWith("ECS Fargate"),
+      )!;
+      const inline = (sgs[ecsSgId].Properties.SecurityGroupIngress ?? []) as any[];
+      return inline.filter((r) => r.FromPort === 8080 && r.CidrIp !== undefined);
+    };
+    expect(ecsSgRulesFromVpc({})).toHaveLength(1); // default mode: as today
+    expect(ecsSgRulesFromVpc({ service_discovery: "alb" })).toHaveLength(0);
+  });
+
+  test("default mode: no listener, and the reload Lambda keeps the Cloud Map namespace", () => {
+    const def = renderVkgWithContext({});
+    def.resourceCountIs("AWS::ElasticLoadBalancingV2::Listener", 0);
+    const env = reloadEnv(def);
+    expect(env).toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+    expect(env).not.toHaveProperty("SERVICE_DISCOVERY_BACKEND");
+  });
+});

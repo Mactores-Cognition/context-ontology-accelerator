@@ -3,12 +3,17 @@
 
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
+import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 import { SCLStack } from "../../constructs";
-import { isDynamoDbMetadataStore, resolveContext } from "../../context";
+import {
+  isAlbServiceDiscovery,
+  isDynamoDbMetadataStore,
+  resolveContext,
+} from "../../context";
 import {
   JdbcConnectivity,
   type PeeringConfig,
@@ -68,8 +73,18 @@ export class NetworkStack extends SCLStack {
   /** EC2 Interface VPC Endpoint ID for AOSS (NextGen *.on.aws private DNS). */
   public readonly aossVpcEndpointId: string;
 
-  /** Shared Cloud Map private DNS namespace for service discovery. */
-  public readonly serviceNamespace: servicediscovery.PrivateDnsNamespace;
+  /**
+   * Shared Cloud Map private DNS namespace for service discovery. Undefined
+   * with `service_discovery=alb`, where {@link servicesAlb} replaces it.
+   */
+  public readonly serviceNamespace?: servicediscovery.PrivateDnsNamespace;
+
+  /**
+   * Internal ALB in front of ontology-engine (listener 8001, OntologyStack)
+   * and the per-namespace VKG services (listener 8080, VkgStack). Only with
+   * `service_discovery=alb`.
+   */
+  public readonly servicesAlb?: elbv2.ApplicationLoadBalancer;
 
   /** Security group for Glue Connections to reach source databases. */
   public readonly connectorSecurityGroup: ec2.SecurityGroup;
@@ -320,11 +335,15 @@ export class NetworkStack extends SCLStack {
       ec2.Port.tcp(8182),
       "Neptune Gremlin/SPARQL",
     );
-    this.lambdaSecurityGroup.addEgressRule(
-      this.ecsSecurityGroup,
-      ec2.Port.tcp(8001),
-      "Ontology-engine API: api-proxy Lambda to ECS Cloud Map service",
-    );
+    // With the internal ALB the Lambdas reach ontology-engine through it
+    // instead (createServicesAlb).
+    if (!isAlbServiceDiscovery(this.node)) {
+      this.lambdaSecurityGroup.addEgressRule(
+        this.ecsSecurityGroup,
+        ec2.Port.tcp(8001),
+        "Ontology-engine API: api-proxy Lambda to ECS Cloud Map service",
+      );
+    }
     // The discovery Lambda (sources-db-connector) connects DIRECTLY to source
     // databases via its driver dialects (see database/connectors/dialects.py),
     // not through Glue/Athena — so it needs egress to the supported DB ports.
@@ -383,15 +402,19 @@ export class NetworkStack extends SCLStack {
       "Allow HTTPS from ECS tasks",
     );
 
-    // ── Cloud Map Namespace ────────────────────────────────────────────
-    this.serviceNamespace = new servicediscovery.PrivateDnsNamespace(
-      this,
-      "ServiceNamespace",
-      {
-        name: `${this.prefixed("services")}.local`,
-        vpc: this.vpc,
-      },
-    );
+    // ── Service discovery: Cloud Map namespace, or the internal ALB ────
+    if (isAlbServiceDiscovery(this.node)) {
+      this.servicesAlb = this.createServicesAlb();
+    } else {
+      this.serviceNamespace = new servicediscovery.PrivateDnsNamespace(
+        this,
+        "ServiceNamespace",
+        {
+          name: `${this.prefixed("services")}.local`,
+          vpc: this.vpc,
+        },
+      );
+    }
 
     // Connector SG — used by Glue Connections to reach source databases.
     // Egress restricted to least privilege: the supported source-DB
@@ -502,9 +525,71 @@ export class NetworkStack extends SCLStack {
         "SemanticContext private subnet IDs (with egress), comma-separated",
     });
 
-    new cdk.CfnOutput(this, "ServiceNamespaceArn", {
-      value: this.serviceNamespace.namespaceArn,
-      description: "Shared Cloud Map namespace ARN for service discovery",
+    if (this.serviceNamespace) {
+      new cdk.CfnOutput(this, "ServiceNamespaceArn", {
+        value: this.serviceNamespace.namespaceArn,
+        description: "Shared Cloud Map namespace ARN for service discovery",
+      });
+    }
+  }
+
+  /**
+   * Internal ALB that replaces Cloud Map (`service_discovery=alb`).
+   *
+   * Listeners live in the stacks that own the targets: OntologyStack adds 8001
+   * (default action: ontology-engine) and VkgStack adds 8080 (one rule per
+   * namespace on the X-Coa-Namespace header, added at runtime by the reload
+   * Lambda). Plain HTTP inside the VPC, as with Cloud Map.
+   *
+   * The idle timeout is 180 s because namespace delete's
+   * `DELETE /ontologies?namespace=` call to ontology-engine is synchronous and
+   * may take up to its 120 s client timeout; the 60 s default would cut it.
+   */
+  private createServicesAlb(): elbv2.ApplicationLoadBalancer {
+    const albSecurityGroup = new ec2.SecurityGroup(this, "ServicesAlbSG", {
+      vpc: this.vpc,
+      securityGroupName: this.prefixed("services-alb-sg"),
+      // Generic description (immutable in CFN — keep rule-agnostic).
+      description: "Internal services ALB security group",
+      allowAllOutbound: false,
+    });
+    // Same callers as the direct rules used with Cloud Map: the Lambdas on
+    // 8001 (ontology-engine), anything in the VPC on 8080 (VKG).
+    albSecurityGroup.addIngressRule(
+      this.lambdaSecurityGroup,
+      ec2.Port.tcp(8001),
+      "Ontology-engine API from Lambda functions",
+    );
+    albSecurityGroup.addIngressRule(
+      ec2.Peer.ipv4(this.vpc.vpcCidrBlock),
+      ec2.Port.tcp(8080),
+      "VKG SPARQL translation from the VPC",
+    );
+    this.lambdaSecurityGroup.addEgressRule(
+      albSecurityGroup,
+      ec2.Port.tcp(8001),
+      "Ontology-engine API through the internal services ALB",
+    );
+    // Per-namespace VKG target groups are created at runtime, so CDK cannot
+    // add their rules; ontology-engine's 8001 rules come from its target group.
+    albSecurityGroup.addEgressRule(
+      this.ecsSecurityGroup,
+      ec2.Port.tcp(8080),
+      "VKG tasks",
+    );
+    this.ecsSecurityGroup.addIngressRule(
+      albSecurityGroup,
+      ec2.Port.tcp(8080),
+      "VKG from the internal services ALB",
+    );
+
+    return new elbv2.ApplicationLoadBalancer(this, "ServicesAlb", {
+      vpc: this.vpc,
+      internetFacing: false,
+      securityGroup: albSecurityGroup,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      idleTimeout: cdk.Duration.seconds(180),
+      dropInvalidHeaderFields: true,
     });
   }
 

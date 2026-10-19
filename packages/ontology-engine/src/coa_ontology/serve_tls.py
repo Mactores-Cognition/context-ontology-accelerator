@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Run ontology-engine with HTTPS for the internal ALB (``service_discovery=alb``).
 
 Started by the Dockerfile only when ``SERVICE_TLS_PORT`` is set. One process,

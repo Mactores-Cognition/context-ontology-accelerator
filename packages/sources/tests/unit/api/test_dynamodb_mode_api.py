@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Sources API in DynamoDB mode (METADATA_STORE_BACKEND=dynamodb).
 
 SourcesStack does not set SMUS_DOMAIN_ID in this mode, so the module-level

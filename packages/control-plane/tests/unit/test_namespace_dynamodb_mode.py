@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Namespace create/delete in DynamoDB mode (METADATA_STORE_BACKEND=dynamodb).
 
 In this mode the infra sets METADATA_STORE_BACKEND and METADATA_STORE_TABLE

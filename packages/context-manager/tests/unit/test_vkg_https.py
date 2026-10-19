@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """VKGClient verifies VKG's certificate behind the internal ALB (HTTPS).
 
 With AWS Private CA the client verifies against the TLS context from

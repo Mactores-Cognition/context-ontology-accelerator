@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Deploy/destroy script behaviour for the DynamoDB metadata store.
 
 With ``SCL_METADATA_STORE=dynamodb`` the platform deploys no DataZone domain:

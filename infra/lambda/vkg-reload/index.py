@@ -364,10 +364,18 @@ def _register_task_definition(ns, prefix, container_image):
                     {"name": "NAMESPACE_ID", "value": ns},
                     {"name": "ENDPOINT_PORT", "value": "8080"},
                     {"name": "ONTOP_JAVA_ARGS", "value": ontop_java_args},
+                    # ALB mode is HTTPS-only: entrypoint.sh makes a self-signed
+                    # certificate and the facade serves TLS on 8080.
+                    *([{"name": "SERVICE_TLS", "value": "1"}] if _alb_mode() else []),
                 ],
                 "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
                 "healthCheck": {
-                    "command": ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"],
+                    "command": [
+                        "CMD-SHELL",
+                        "curl -sfk https://localhost:8080/health || exit 1"
+                        if _alb_mode()
+                        else "curl -sf http://localhost:8080/health || exit 1",
+                    ],
                     "interval": 30,
                     "timeout": 10,
                     "retries": 5,
@@ -593,10 +601,11 @@ def _ensure_alb_route(ns, prefix, listener_arn, vpc_id):
     try:
         tg = elbv2.create_target_group(
             Name=_target_group_name(prefix, ns),
-            Protocol="HTTP",
+            Protocol="HTTPS",
             Port=_VKG_PORT,
             VpcId=vpc_id,
             TargetType="ip",
+            HealthCheckProtocol="HTTPS",
             HealthCheckPath="/health",
             HealthCheckIntervalSeconds=30,
             Matcher={"HttpCode": "200"},

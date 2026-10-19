@@ -30,6 +30,7 @@ from coa_common.constants import graphrag_index_names
 from coa_common.dao import DynamoDBDAO, QueryParams
 from coa_common.metadata_store import get_metadata_store, is_dynamodb_backend
 from coa_common.opensearch import AossVectorClient
+from coa_common.service_tls import ssl_context
 
 logger = structlog.get_logger(__name__)
 
@@ -496,7 +497,8 @@ def delete_all_ontologies(namespace_id: str) -> None:
     req = urllib_request.Request(url, method="DELETE")
 
     try:
-        with urllib_request.urlopen(req, timeout=120) as resp:  # noqa: S310
+        # ssl_context(): trusts the private CA behind the internal ALB; None otherwise.
+        with urllib_request.urlopen(req, timeout=120, context=ssl_context()) as resp:  # noqa: S310
             body = json.loads(resp.read().decode("utf-8"))
             logger.info(
                 "all_ontologies_deleted",

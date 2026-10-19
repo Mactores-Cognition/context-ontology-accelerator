@@ -155,7 +155,8 @@ class TestProvisionInAlbMode:
         assert result["status"] == "provisioned"
         tg_kwargs = elbv2.create_target_group.call_args.kwargs
         assert tg_kwargs["Name"] == _expected_tg_name("coa-dev", NS)
-        assert tg_kwargs["Protocol"] == "HTTP"
+        assert tg_kwargs["Protocol"] == "HTTPS"
+        assert tg_kwargs["HealthCheckProtocol"] == "HTTPS"
         assert tg_kwargs["Port"] == 8080
         assert tg_kwargs["VpcId"] == "vpc-123"
         assert tg_kwargs["TargetType"] == "ip"
@@ -236,6 +237,46 @@ class TestProvisionInAlbMode:
         assert result["status"] == "skipped"
         assert "env vars" in result["reason"]
         elbv2.create_target_group.assert_not_called()
+
+
+class TestTaskDefinitionTls:
+    """ALB mode is HTTPS-only: the per-namespace VKG task serves TLS on 8080."""
+
+    @staticmethod
+    def _container(index):
+        return index.ecs.register_task_definition.call_args.kwargs["containerDefinitions"][0]
+
+    @patch.dict(os.environ, ENV_ALB, clear=False)
+    def test_alb_mode_turns_tls_on_and_health_checks_over_https(self):
+        ecs, elbv2, ssm, sd = _mocks()
+        index = _load(ecs, elbv2, ssm, sd)
+
+        index.handler(_event(), None)
+
+        container = self._container(index)
+        assert {"name": "SERVICE_TLS", "value": "1"} in container["environment"]
+        check = " ".join(container["healthCheck"]["command"])
+        assert "https://localhost:8080/health" in check
+        # self-signed: curl skips verification (-k, possibly combined, e.g. -sfk)
+        assert any(t.startswith("-") and not t.startswith("--") and "k" in t for t in check.split())
+
+    @patch.dict(
+        os.environ,
+        {**{k: v for k, v in ENV_ALB.items() if k != "SERVICE_DISCOVERY_BACKEND"}, "CLOUD_MAP_NAMESPACE_ID": "ns-1"},
+        clear=False,
+    )
+    def test_default_mode_task_definition_unchanged(self):
+        os.environ.pop("SERVICE_DISCOVERY_BACKEND", None)
+        ecs, elbv2, ssm, sd = _mocks()
+        sd.create_service.return_value = {"Service": {"Arn": "arn:sd:svc"}}
+        sd.exceptions.ServiceAlreadyExists = type("ServiceAlreadyExists", (Exception,), {})
+        index = _load(ecs, elbv2, ssm, sd)
+
+        index.handler(_event(), None)
+
+        container = self._container(index)
+        assert "SERVICE_TLS" not in {e["name"] for e in container["environment"]}
+        assert "http://localhost:8080/health" in " ".join(container["healthCheck"]["command"])
 
 
 class TestDefaultModeUnchanged:

@@ -20,6 +20,8 @@ import {
   METADATA_STORE_DYNAMODB,
   NO_DATAZONE_DOMAIN,
   resolveContext,
+  SERVICE_CA_CERT_PARAM_ENV,
+  serviceCaCertParamName,
 } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NamespaceDeletionPipeline } from "./namespace-deletion-pipeline";
@@ -209,6 +211,11 @@ export class NamespaceStack extends SCLStack {
           ...(props.ontologyEngineEndpoint && {
             ONTOLOGY_ENGINE_ENDPOINT: props.ontologyEngineEndpoint,
           }),
+          // Private CA root for verifying ontology-engine's ALB certificate
+          // (internal ALB with AWS Private CA only).
+          ...(serviceCaCertParamName(this.node) && {
+            [SERVICE_CA_CERT_PARAM_ENV]: serviceCaCertParamName(this.node),
+          }),
           // Lets get_handler resolve VKG service health from ECS
           // (resolve_vkg_health). Absent this var the resolver short-circuits
           // to UNKNOWN for every namespace.
@@ -231,7 +238,19 @@ export class NamespaceStack extends SCLStack {
     //   failed jobs no longer block deletion).
     // Ontology induction jobs are checked via an HTTP call to the
     // ontology-engine (see delete_handler._check_active_induction_jobs) —
-    // no DynamoDB grant needed for that check.
+    // no DynamoDB grant needed for that check. Over HTTPS with a private CA
+    // the call reads the CA root from SSM.
+    const caCertParam = serviceCaCertParamName(this.node);
+    if (caCertParam) {
+      namespaceApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${caCertParam}`,
+          ],
+        }),
+      );
+    }
     namespaceApiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["dynamodb:Query"],

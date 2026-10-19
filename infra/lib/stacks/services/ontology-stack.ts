@@ -27,6 +27,8 @@ import {
   isDynamoDbMetadataStore,
   METADATA_STORE_DYNAMODB,
   resolveContext,
+  SERVICE_CA_CERT_PARAM_ENV,
+  serviceCaCertParamName,
 } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
@@ -36,6 +38,12 @@ import {
   DEFAULT_BEDROCK_INDUCTION_MODEL_ID,
 } from "../../constants";
 import { TABLE_NAMES } from "@coa/shared";
+
+/**
+ * Container port where ontology-engine serves HTTPS for the internal ALB
+ * (`service_discovery=alb`); the regular port stays HTTP on localhost.
+ */
+export const ONTOLOGY_ENGINE_TLS_PORT = 8443;
 
 export interface OntologyStackProps extends cdk.StackProps {
   readonly network: NetworkStack;
@@ -163,9 +171,13 @@ export class OntologyStack extends SCLStack {
           : "OntologyStack requires serviceNamespace (Cloud Map).",
       );
     }
+    // ALB mode is HTTPS-only: callers use the name in the private zone, which
+    // the ALB certificate covers; the ALB reaches the container's TLS port.
     const serviceEndpoint = albMode
-      ? `http://${servicesAlb!.loadBalancerDnsName}:${this.containerPort}`
+      ? `https://ontology-engine.${props.network.serviceTls!.domainName}:${this.containerPort}`
       : `http://ontology-engine.${namespace!.namespaceName}:${this.containerPort}`;
+    const tlsPort = ONTOLOGY_ENGINE_TLS_PORT;
+    const caCertParam = serviceCaCertParamName(this.node);
 
     // ── Cross-stack table names via SSM ──────────────────────────────
     // We avoid direct construct prop refs (which create CloudFormation
@@ -316,12 +328,18 @@ export class OntologyStack extends SCLStack {
         SOURCES_API_FN_NAME: `${this.prefixed("sources-api")}`,
         INDUCE_OUTPUT_DIR: "/tmp/induce",
         PORT: String(this.containerPort),
+        // ALB mode: also serve HTTPS on this port for the ALB (serve_tls.py);
+        // PORT then stays HTTP on 127.0.0.1 for the engine's own calls.
+        ...(albMode && { SERVICE_TLS_PORT: String(tlsPort) }),
       },
       portMappings: [
         {
           containerPort: this.containerPort,
           protocol: ecs.Protocol.TCP,
         },
+        ...(albMode
+          ? [{ containerPort: tlsPort, protocol: ecs.Protocol.TCP }]
+          : []),
       ],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "ontology-engine",
@@ -576,29 +594,45 @@ export class OntologyStack extends SCLStack {
     this.service.node.addDependency(ossDataAccessPolicy);
 
     if (albMode) {
-      // Internal ALB: listener on the container port, ontology-engine as the
-      // default action (no listener rule needed). Attaching the service adds
-      // the ALB -> task security-group rules.
+      // Internal ALB, HTTPS on both legs: listener on the container port with
+      // the service certificate, ontology-engine as the default action (no
+      // listener rule needed), forwarding over HTTPS to the container's TLS
+      // port (self-signed; the ALB does not validate target certificates).
+      // Registering the target adds the ALB -> task security-group rules.
       const targetGroup = new elbv2.ApplicationTargetGroup(
         this,
         "OntologyEngineTargetGroup",
         {
           vpc,
-          port: this.containerPort,
-          protocol: elbv2.ApplicationProtocol.HTTP,
+          port: tlsPort,
+          protocol: elbv2.ApplicationProtocol.HTTPS,
           targetType: elbv2.TargetType.IP,
-          healthCheck: { path: "/health", healthyHttpCodes: "200" },
+          healthCheck: {
+            path: "/health",
+            healthyHttpCodes: "200",
+            protocol: elbv2.Protocol.HTTPS,
+          },
           deregistrationDelay: cdk.Duration.seconds(30),
         },
       );
       new elbv2.ApplicationListener(this, "OntologyEngineListener", {
         loadBalancer: servicesAlb!,
         port: this.containerPort,
-        protocol: elbv2.ApplicationProtocol.HTTP,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [
+          elbv2.ListenerCertificate.fromCertificateManager(
+            props.network.serviceTls!.certificate,
+          ),
+        ],
         open: false,
         defaultTargetGroups: [targetGroup],
       });
-      this.service.attachToApplicationTargetGroup(targetGroup);
+      targetGroup.addTarget(
+        this.service.loadBalancerTarget({
+          containerName: this.prefixed("ontology-engine"),
+          containerPort: tlsPort,
+        }),
+      );
     } else {
       ecsSecurityGroup.addIngressRule(
         props.network.lambdaSecurityGroup,
@@ -1144,12 +1178,24 @@ export class OntologyStack extends SCLStack {
         // (which inject the namespace as a search domain); Lambda's
         // resolver requires the fully-qualified name.
         ONTOLOGY_ENGINE_ENDPOINT: serviceEndpoint,
+        // Private CA root for verifying the ALB certificate (ALB mode only).
+        ...(caCertParam && { [SERVICE_CA_CERT_PARAM_ENV]: caCertParam }),
         SOURCES_TABLE: sourcesTableName,
         NEPTUNE_ENDPOINT: props.neptuneClusterEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
         ALLOWED_ORIGIN: props.allowedOrigin,
       },
     });
+    if (caCertParam) {
+      apiProxyFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${caCertParam}`,
+          ],
+        }),
+      );
+    }
     apiProxyFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["dynamodb:DescribeTable"],

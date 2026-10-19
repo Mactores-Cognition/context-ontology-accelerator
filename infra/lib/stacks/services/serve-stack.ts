@@ -16,7 +16,9 @@ import {
   isAlbServiceDiscovery,
   resolveContext,
   namespaceTagKey,
+  SERVICE_CA_CERT_PARAM_ENV,
   SERVICE_DISCOVERY_ALB,
+  serviceCaCertParamName,
 } from "../../context";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
@@ -494,6 +496,11 @@ export class ServeStack extends SCLStack {
           // X-Coa-Namespace header instead of rewriting the hostname.
           ...(isAlbServiceDiscovery(this.node) && {
             SERVICE_DISCOVERY_BACKEND: SERVICE_DISCOVERY_ALB,
+          }),
+          // Private CA root for verifying VKG's ALB certificate. The runtime
+          // already reads the whole /<prefix> parameter tree.
+          ...(serviceCaCertParamName(this.node) && {
+            [SERVICE_CA_CERT_PARAM_ENV]: serviceCaCertParamName(this.node),
           }),
           OPENSEARCH_ENDPOINT: opensearchEndpoint,
           // TODO(aoss-proxy): Remove when AgentCore supports AOSS directly

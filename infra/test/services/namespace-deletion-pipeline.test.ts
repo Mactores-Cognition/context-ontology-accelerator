@@ -529,4 +529,25 @@ describe("NamespaceDeletionPipeline in ALB mode (service_discovery=alb)", () => 
     expect(all.filter((a) => a.startsWith("servicediscovery:"))).toEqual([]);
     expect(all).toContain("ecs:DeleteService");
   });
+
+  test("ALB mode: DeleteOntologyFn trusts the private CA (parameter name + ssm:GetParameter on it)", () => {
+    const fn = Object.values(
+      template.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: "coa-dev-ns-deletion-ontology" },
+      }),
+    )[0] as any;
+    expect(fn.Properties.Environment.Variables.SERVICE_CA_CERT_PARAM).toBe(
+      "/coa/services/ca-cert",
+    );
+    const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => (p.Properties.PolicyName as string).includes("DeleteOntologyFn"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (st: any) =>
+          [st.Action].flat().includes("ssm:GetParameter") &&
+          JSON.stringify(st.Resource).includes("/coa/services/ca-cert"),
+      ),
+    ).toBe(true);
+  });
 });

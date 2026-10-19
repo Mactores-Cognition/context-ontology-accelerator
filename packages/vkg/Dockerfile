@@ -13,7 +13,7 @@ ARG H2_SHA256=b9d8f19358ada82a4f6eb5b174c6cfe320a375b5a9cb5a4fe456d623e6e55497
 
 # Install dependencies and Ontop CLI
 COPY requirements.txt /tmp/requirements.txt
-RUN yum install -y python3 python3-pip unzip shadow-utils findutils && \
+RUN yum install -y python3 python3-pip unzip shadow-utils findutils openssl && \
   yum update -y --security && \
   pip3 install --no-cache-dir -r /tmp/requirements.txt && \
   curl -fsSL "https://github.com/ontop/ontop/releases/download/ontop-${ONTOP_VERSION}/ontop-cli-${ONTOP_VERSION}.zip" \

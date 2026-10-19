@@ -558,3 +558,114 @@ describe("NetworkStack in ALB mode (service_discovery=alb)", () => {
     buildStack().resourceCountIs("AWS::ElasticLoadBalancingV2::LoadBalancer", 0);
   });
 });
+
+// HTTPS for the internal ALB (replace-cloud-map-notes.txt sections 14-15):
+// services get names in a Route 53 private zone and a certificate for them,
+// from AWS Private CA (service_cert=private-ca, the default) or a public ACM
+// certificate (service_cert=acm-public). Default (Cloud Map) mode is unchanged.
+describe("NetworkStack HTTPS for the internal ALB", () => {
+  const ALB = { service_discovery: "alb" };
+  const PUBLIC = {
+    service_discovery: "alb",
+    service_cert: "acm-public",
+    service_domain: "coa-poc.example.com",
+    public_zone_id: "Z0123456789ABC",
+  };
+
+  it("ALB mode: private hosted zone <prefix>-<env>.internal attached to the VPC", () => {
+    buildStack(ALB).hasResourceProperties("AWS::Route53::HostedZone", {
+      Name: "coa-dev.internal.",
+      VPCs: Match.arrayWith([Match.objectLike({ VPCId: Match.anyValue() })]),
+    });
+  });
+
+  it("ALB mode: ontology-engine and vkg records alias the internal ALB", () => {
+    const template = buildStack(ALB);
+    for (const name of ["ontology-engine.coa-dev.internal.", "vkg.coa-dev.internal."]) {
+      template.hasResourceProperties("AWS::Route53::RecordSet", {
+        Name: name,
+        Type: "A",
+        AliasTarget: Match.objectLike({ DNSName: Match.anyValue() }),
+      });
+    }
+  });
+
+  it("ALB mode (private-ca, default): general-purpose root CA, activated, ACM may use it", () => {
+    const template = buildStack(ALB);
+    template.hasResourceProperties("AWS::ACMPCA::CertificateAuthority", {
+      Type: "ROOT",
+      UsageMode: "GENERAL_PURPOSE",
+    });
+    template.resourceCountIs("AWS::ACMPCA::Certificate", 1);
+    template.hasResourceProperties("AWS::ACMPCA::CertificateAuthorityActivation", {
+      Status: "ACTIVE",
+    });
+    template.hasResourceProperties("AWS::ACMPCA::Permission", {
+      Principal: "acm.amazonaws.com",
+      Actions: Match.arrayWith(["IssueCertificate", "GetCertificate", "ListPermissions"]),
+    });
+  });
+
+  it("ALB mode (private-ca): root CA certificate template ARN uses the stack partition (GovCloud)", () => {
+    const [cert] = Object.values(
+      buildStack(ALB).findResources("AWS::ACMPCA::Certificate"),
+    ) as any[];
+    const arn = JSON.stringify(cert.Properties.TemplateArn);
+    expect(arn).toContain("AWS::Partition");
+    expect(arn).toContain("template/RootCACertificate/V1");
+  });
+
+  it("ALB mode (private-ca): ACM private certificate for *.<zone>, issued by the CA", () => {
+    buildStack(ALB).hasResourceProperties("AWS::CertificateManager::Certificate", {
+      DomainName: "*.coa-dev.internal",
+      CertificateAuthorityArn: Match.anyValue(),
+    });
+  });
+
+  it("ALB mode (private-ca): CA root certificate published to SSM for the callers", () => {
+    buildStack(ALB).hasResourceProperties("AWS::SSM::Parameter", {
+      Name: "/coa/services/ca-cert",
+    });
+  });
+
+  it("service_cert=acm-public: DNS-validated public certificate, no Private CA, no CA parameter", () => {
+    const template = buildStack(PUBLIC);
+    template.hasResourceProperties("AWS::CertificateManager::Certificate", {
+      DomainName: "*.coa-poc.example.com",
+      ValidationMethod: "DNS",
+      DomainValidationOptions: Match.arrayWith([
+        Match.objectLike({ HostedZoneId: "Z0123456789ABC" }),
+      ]),
+    });
+    template.resourceCountIs("AWS::ACMPCA::CertificateAuthority", 0);
+    expect(
+      Object.keys(
+        template.findResources("AWS::SSM::Parameter", {
+          Properties: { Name: "/coa/services/ca-cert" },
+        }),
+      ),
+    ).toHaveLength(0);
+    template.hasResourceProperties("AWS::Route53::HostedZone", {
+      Name: "coa-poc.example.com.",
+    });
+  });
+
+  it("service_cert=acm-public without service_domain or public_zone_id fails synth", () => {
+    expect(() =>
+      buildStack({ service_discovery: "alb", service_cert: "acm-public" }),
+    ).toThrow(/service_domain|public_zone_id/);
+  });
+
+  it("an unknown service_cert fails synth", () => {
+    expect(() =>
+      buildStack({ service_discovery: "alb", service_cert: "self-signed" }),
+    ).toThrow(/service_cert/);
+  });
+
+  it("default mode: no hosted zone, no CA, no certificate", () => {
+    const template = buildStack();
+    template.resourceCountIs("AWS::Route53::HostedZone", 0);
+    template.resourceCountIs("AWS::ACMPCA::CertificateAuthority", 0);
+    template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+  });
+});

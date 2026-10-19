@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """VKG routing through the internal ALB (SERVICE_DISCOVERY_BACKEND=alb).
 
 With Cloud Map each namespace's VKG service has its own hostname, so the

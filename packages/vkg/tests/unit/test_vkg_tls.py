@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """VKG facade over HTTPS behind the internal ALB (SERVICE_TLS=1, ALB mode only).
 
 entrypoint.sh makes a self-signed certificate and exports SERVICE_TLS_CERT /

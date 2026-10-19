@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """VKG teardown on namespace delete with the internal ALB instead of Cloud Map.
 
 With ``SERVICE_DISCOVERY_BACKEND=alb`` the reload Lambda routes a namespace's

@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """VKG reload Lambda with the internal ALB instead of Cloud Map.
 
 With ``SERVICE_DISCOVERY_BACKEND=alb`` a new namespace's VKG service is reached

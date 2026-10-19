@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Deploy/destroy script behaviour for the internal ALB (service_discovery=alb).
 
 With ``SCL_SERVICE_DISCOVERY=alb`` ontology-engine and the per-namespace VKG

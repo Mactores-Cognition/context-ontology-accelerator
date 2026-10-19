@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """ontology-engine behind the internal ALB over HTTPS.
 
 Two sides (replace-cloud-map-notes.txt sections 14-15):

@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """TLS context for calls to COA's own services behind the internal ALB.
 
 With the internal ALB and AWS Private CA (service_cert=private-ca), the

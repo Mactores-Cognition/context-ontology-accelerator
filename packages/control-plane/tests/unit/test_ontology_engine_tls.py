@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Control-plane calls to ontology-engine verify its certificate.
 
 Behind the internal ALB (HTTPS, AWS Private CA) the namespace API's

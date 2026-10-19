@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import retryhttp
 import structlog
+from coa_common.service_tls import ssl_context
 
 from .base import instrumented
 
@@ -96,7 +97,14 @@ class VKGClient:
 
     async def _get_http(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout, headers=self._headers)
+            # Behind the internal ALB with AWS Private CA, verify against that CA.
+            ctx = ssl_context()
+            self._http = httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=self._timeout,
+                headers=self._headers,
+                verify=ctx if ctx is not None else True,
+            )
         return self._http
 
     async def close(self) -> None:

@@ -127,6 +127,77 @@ export function isAlbServiceDiscovery(node: Node): boolean {
   return node.tryGetContext(CTX_SERVICE_DISCOVERY) === SERVICE_DISCOVERY_ALB;
 }
 
+/**
+ * CDK context keys for HTTPS on the internal ALB (`service_discovery=alb`).
+ * `service_cert` picks where the certificate comes from: `private-ca` (the
+ * default; AWS Private CA, no domain needed) or `acm-public` (a public ACM
+ * certificate for `service_domain`, DNS-validated in the Route 53 public zone
+ * `public_zone_id`).
+ */
+export const CTX_SERVICE_CERT = "service_cert";
+export const CTX_SERVICE_DOMAIN = "service_domain";
+export const CTX_PUBLIC_ZONE_ID = "public_zone_id";
+export const SERVICE_CERT_PRIVATE_CA = "private-ca";
+export const SERVICE_CERT_ACM_PUBLIC = "acm-public";
+
+/** Resolved HTTPS settings for the internal ALB. */
+export interface ServiceTlsSettings {
+  /** Certificate source: `private-ca` or `acm-public`. */
+  readonly mode:
+    | typeof SERVICE_CERT_PRIVATE_CA
+    | typeof SERVICE_CERT_ACM_PUBLIC;
+  /** Route 53 private zone name; the certificate covers `*.<domainName>`. */
+  readonly domainName: string;
+  /** Public hosted zone that validates the certificate (`acm-public` only). */
+  readonly publicZoneId?: string;
+}
+
+/**
+ * Resolve the HTTPS settings for the internal ALB. The private-CA default uses
+ * the internal zone `<prefix>-<env>.internal`.
+ *
+ * @throws if `service_cert` is unknown, or `acm-public` lacks its domain or zone.
+ */
+export function resolveServiceTls(node: Node): ServiceTlsSettings {
+  const mode =
+    (node.tryGetContext(CTX_SERVICE_CERT) as string | undefined) ??
+    SERVICE_CERT_PRIVATE_CA;
+  const domain = node.tryGetContext(CTX_SERVICE_DOMAIN) as string | undefined;
+  if (mode === SERVICE_CERT_PRIVATE_CA) {
+    const { prefix, envName } = resolveContext(node);
+    return { mode, domainName: domain ?? `${prefix}-${envName}.internal` };
+  }
+  if (mode === SERVICE_CERT_ACM_PUBLIC) {
+    const publicZoneId = node.tryGetContext(CTX_PUBLIC_ZONE_ID) as
+      | string
+      | undefined;
+    if (!domain || !publicZoneId) {
+      throw new Error(
+        `${CTX_SERVICE_CERT}=${SERVICE_CERT_ACM_PUBLIC} needs ${CTX_SERVICE_DOMAIN} and ${CTX_PUBLIC_ZONE_ID}`,
+      );
+    }
+    return { mode, domainName: domain, publicZoneId };
+  }
+  throw new Error(
+    `Unknown ${CTX_SERVICE_CERT}: ${mode} (expected ${SERVICE_CERT_PRIVATE_CA} or ${SERVICE_CERT_ACM_PUBLIC})`,
+  );
+}
+
+/**
+ * SSM parameter holding the private CA's root certificate, which callers of
+ * ontology-engine and VKG add to their trust store. Undefined unless the
+ * internal ALB uses AWS Private CA (Cloud Map mode, or a public certificate).
+ */
+export function serviceCaCertParamName(node: Node): string | undefined {
+  if (!isAlbServiceDiscovery(node)) return undefined;
+  if (resolveServiceTls(node).mode !== SERVICE_CERT_PRIVATE_CA)
+    return undefined;
+  return `${resolveContext(node).ssmPrefix}/services/ca-cert`;
+}
+
+/** Environment variable that carries {@link serviceCaCertParamName} to callers. */
+export const SERVICE_CA_CERT_PARAM_ENV = "SERVICE_CA_CERT_PARAM";
+
 /** Return `{prefix}-{env}-{name}`. */
 export function prefixed(node: Node, name: string): string {
   const { prefix, envName } = resolveContext(node);

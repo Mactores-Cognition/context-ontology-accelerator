@@ -492,10 +492,11 @@ describe("VkgStack in ALB mode (service_discovery=alb)", () => {
       .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
       .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
 
-  test("ALB mode: listener on 8080 answers unknown namespaces with a fixed 404", () => {
+  test("ALB mode: HTTPS listener on 8080 answers unknown namespaces with a fixed 404", () => {
     template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
       Port: 8080,
-      Protocol: "HTTP",
+      Protocol: "HTTPS",
+      Certificates: [Match.objectLike({ CertificateArn: Match.anyValue() })],
       DefaultActions: [
         Match.objectLike({
           Type: "fixed-response",
@@ -528,15 +529,13 @@ describe("VkgStack in ALB mode (service_discovery=alb)", () => {
     expect(all.filter((a) => a.startsWith("servicediscovery:"))).toEqual([]);
   });
 
-  test("ALB mode: endpoint SSM parameter points at the ALB and the listener ARN is published", () => {
+  test("ALB mode: endpoint SSM parameter uses the HTTPS service name and the listener ARN is published", () => {
     const [endpoint] = Object.values(
       template.findResources("AWS::SSM::Parameter", {
         Properties: { Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/endpoint` },
       }),
     ) as any[];
-    const value = JSON.stringify(endpoint.Properties.Value);
-    expect(value).not.toContain("services.local");
-    expect(value).toContain("DNSName");
+    expect(endpoint.Properties.Value).toBe(`https://vkg.${PREFIX}.internal:8080`);
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/listener-arn`,
     });
@@ -572,5 +571,29 @@ describe("VkgStack in ALB mode (service_discovery=alb)", () => {
     const env = reloadEnv(def);
     expect(env).toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
     expect(env).not.toHaveProperty("SERVICE_DISCOVERY_BACKEND");
+  });
+});
+
+// HTTPS for the internal ALB: the VKG container template serves HTTPS
+// (SERVICE_TLS=1) and its health check uses it. Per-namespace task
+// definitions come from the reload Lambda (infra/test/lambdas).
+describe("VkgStack HTTPS for the internal ALB", () => {
+  const ontop = (t: Template): any => {
+    const [td] = Object.values(t.findResources("AWS::ECS::TaskDefinition")) as any[];
+    return td.Properties.ContainerDefinitions[0];
+  };
+
+  test("ALB mode: container template turns TLS on and health-checks over HTTPS", () => {
+    const c = ontop(renderVkgWithContext({ service_discovery: "alb" }));
+    expect(c.Environment).toEqual(
+      expect.arrayContaining([{ Name: "SERVICE_TLS", Value: "1" }]),
+    );
+    expect(c.HealthCheck.Command.join(" ")).toContain("https://localhost:8080/health");
+  });
+
+  test("default mode: no SERVICE_TLS and the HTTP health check as before", () => {
+    const c = ontop(renderVkgWithContext({}));
+    expect(c.Environment.map((e: any) => e.Name)).not.toContain("SERVICE_TLS");
+    expect(c.HealthCheck.Command.join(" ")).toContain("http://localhost:8080/health");
   });
 });

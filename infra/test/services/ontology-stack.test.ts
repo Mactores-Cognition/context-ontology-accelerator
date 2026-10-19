@@ -660,33 +660,36 @@ describe("OntologyStack in ALB mode (service_discovery=alb)", () => {
     expect(services).toHaveLength(1);
     const props = services[0].Properties;
     expect(props.ServiceRegistries).toBeUndefined();
+    // The ALB reaches the container's HTTPS port (8443); 8001 stays for the
+    // container's own calls on localhost.
     expect(props.LoadBalancers).toEqual([
-      expect.objectContaining({ ContainerPort: 8001 }),
+      expect.objectContaining({ ContainerPort: 8443 }),
     ]);
     expect(props.HealthCheckGracePeriodSeconds).toBeGreaterThanOrEqual(90);
   });
 
-  test("ALB mode: listener on 8001 forwards to an IP target group with /health checks", () => {
+  test("ALB mode: HTTPS listener on 8001 forwards to an HTTPS IP target group with /health checks", () => {
     template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
       Port: 8001,
-      Protocol: "HTTP",
+      Protocol: "HTTPS",
+      Certificates: [Match.objectLike({ CertificateArn: Match.anyValue() })],
       DefaultActions: [Match.objectLike({ Type: "forward" })],
     });
     template.hasResourceProperties("AWS::ElasticLoadBalancingV2::TargetGroup", {
-      Port: 8001,
-      Protocol: "HTTP",
+      Port: 8443,
+      Protocol: "HTTPS",
       TargetType: "ip",
       HealthCheckPath: "/health",
+      HealthCheckProtocol: "HTTPS",
       TargetGroupAttributes: Match.arrayWith([
         { Key: "deregistration_delay.timeout_seconds", Value: "30" },
       ]),
     });
   });
 
-  test("ALB mode: endpoint SSM parameter and api-proxy env point at the ALB", () => {
+  test("ALB mode: endpoint SSM parameter and api-proxy env use the HTTPS service name", () => {
     const endpoint = ssmValue(template, "/coa/ontology-engine/endpoint");
-    expect(endpoint).not.toContain("services.local");
-    expect(endpoint).toContain("DNSName");
+    expect(endpoint).toBe(JSON.stringify("https://ontology-engine.coa-dev.internal:8001"));
 
     const fns = Object.values(
       template.findResources("AWS::Lambda::Function"),
@@ -695,11 +698,38 @@ describe("OntologyStack in ALB mode (service_discovery=alb)", () => {
       (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
     );
     expect(proxy).toBeDefined();
-    const proxyEndpoint = JSON.stringify(
-      proxy.Properties.Environment.Variables.ONTOLOGY_ENGINE_ENDPOINT,
+    expect(proxy.Properties.Environment.Variables.ONTOLOGY_ENGINE_ENDPOINT).toBe(
+      "https://ontology-engine.coa-dev.internal:8001",
     );
-    expect(proxyEndpoint).not.toContain("services.local");
-    expect(proxyEndpoint).toContain("DNSName");
+  });
+
+  test("ALB mode: container serves HTTPS on 8443 for the ALB and keeps 8001", () => {
+    expect(envValue(template, "SERVICE_TLS_PORT")).toBe("8443");
+    const taskDefs = Object.values(template.findResources("AWS::ECS::TaskDefinition")) as any[];
+    const ports = taskDefs
+      .flatMap((d) => d.Properties.ContainerDefinitions)
+      .flatMap((c: any) => c.PortMappings ?? [])
+      .map((m: any) => m.ContainerPort);
+    expect(ports).toEqual(expect.arrayContaining([8001, 8443]));
+  });
+
+  test("ALB mode: api-proxy trusts the private CA (parameter name + ssm:GetParameter on it)", () => {
+    const fns = Object.values(template.findResources("AWS::Lambda::Function")) as any[];
+    const proxy = fns.find(
+      (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    expect(proxy.Properties.Environment.Variables.SERVICE_CA_CERT_PARAM).toBe(
+      "/coa/services/ca-cert",
+    );
+    const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (s: any) =>
+          [s.Action].flat().includes("ssm:GetParameter") &&
+          JSON.stringify(s.Resource).includes("/coa/services/ca-cert"),
+      ),
+    ).toBe(true);
   });
 
   test("ALB mode: publishes no Cloud Map namespace ARN", () => {
@@ -718,5 +748,6 @@ describe("OntologyStack in ALB mode (service_discovery=alb)", () => {
     def.resourceCountIs("AWS::ElasticLoadBalancingV2::TargetGroup", 0);
     const [svc] = Object.values(def.findResources("AWS::ECS::Service")) as any[];
     expect(svc.Properties.ServiceRegistries).toHaveLength(1);
+    expect(envValue(def, "SERVICE_TLS_PORT")).toBeUndefined();
   });
 });

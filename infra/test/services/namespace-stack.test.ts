@@ -842,5 +842,26 @@ describe("NamespaceStack in ALB mode (service_discovery=alb)", () => {
     expect(vars.VKG_LISTENER_ARN).toBe(listenerArn);
     expect(vars.SERVICE_DISCOVERY_BACKEND).toBe("alb");
     expect(vars).not.toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+
+    // HTTPS: the namespace API (active-jobs check on ontology-engine) trusts
+    // the private CA through the CA root in SSM.
+    const api = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp("namespace-api$") },
+      }),
+    )[0] as any;
+    expect(api.Properties.Environment.Variables.SERVICE_CA_CERT_PARAM).toBe(
+      "/coa/services/ca-cert",
+    );
+    const statements = Object.values(tpl.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => (p.Properties.PolicyName as string).includes("NamespaceApiFn"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (st: any) =>
+          [st.Action].flat().includes("ssm:GetParameter") &&
+          JSON.stringify(st.Resource).includes("/coa/services/ca-cert"),
+      ),
+    ).toBe(true);
   });
 });

@@ -256,9 +256,10 @@ async function deploy(): Promise<void> {
     cloudMapNamespaceId: network.serviceNamespace?.namespaceId,
     vkgListenerArn: vkg.vkgListener?.listenerArn,
     ontologyBucketName: storage.ontologyArtifactsBucket.bucketName,
-    // Cloud Map DNS by default; the internal services ALB with service_discovery=alb.
-    ontologyEngineEndpoint: network.servicesAlb
-      ? `http://${network.servicesAlb.loadBalancerDnsName}:8001`
+    // Cloud Map DNS by default; with service_discovery=alb, HTTPS to the name
+    // in the private zone (the internal services ALB's certificate covers it).
+    ontologyEngineEndpoint: network.serviceTls
+      ? `https://ontology-engine.${network.serviceTls.domainName}:8001`
       : `http://ontology-engine.${prefix}-${envName}-services.local:8001`,
   });
   // The deletion pipeline reads /opensearch/{endpoint,collection-name} to drop
@@ -409,8 +410,8 @@ async function deploy(): Promise<void> {
     neptuneEndpoint: storage.neptuneClusterEndpoint,
     ontologyBucketArn: storage.ontologyArtifactsBucket.bucketArn,
     athenaResultsBucketName: storage.athenaResultsBucket.bucketName,
-    vkgEndpoint: network.servicesAlb
-      ? `http://${network.servicesAlb.loadBalancerDnsName}:${vkg.containerPort}`
+    vkgEndpoint: network.serviceTls
+      ? `https://vkg.${network.serviceTls.domainName}:${vkg.containerPort}`
       : `http://vkg.${prefix}-${envName}-services.local:${vkg.containerPort}`,
     agentCoreAzNames,
     bedrockLlmModelId: config.bedrockLlmModelId,

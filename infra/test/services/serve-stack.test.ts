@@ -964,3 +964,35 @@ describe("ServeStack - service discovery mode", () => {
     expect(envOf(createStack())).not.toHaveProperty("SERVICE_DISCOVERY_BACKEND");
   });
 });
+
+// HTTPS for the internal ALB: the runtime trusts the private CA through the
+// CA root in SSM (it already reads the whole /<prefix> tree, see above).
+describe("ServeStack - private CA for the internal ALB", () => {
+  const envOf = (template: Template): Record<string, unknown> => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    return Object.values(runtimes)[0].Properties.EnvironmentVariables;
+  };
+
+  it("ALB mode (private-ca): passes the CA parameter name", () => {
+    expect(envOf(createStack({ service_discovery: "alb" }))).toMatchObject({
+      SERVICE_CA_CERT_PARAM: "/coa/services/ca-cert",
+    });
+  });
+
+  it("ALB mode with a public certificate: no CA parameter", () => {
+    expect(
+      envOf(
+        createStack({
+          service_discovery: "alb",
+          service_cert: "acm-public",
+          service_domain: "coa-poc.example.com",
+          public_zone_id: "Z0123456789ABC",
+        }),
+      ),
+    ).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+  });
+
+  it("default mode: no CA parameter", () => {
+    expect(envOf(createStack())).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+  });
+});

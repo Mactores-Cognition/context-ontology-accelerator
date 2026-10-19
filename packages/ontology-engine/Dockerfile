@@ -74,4 +74,7 @@ ENV PYTHONPATH=/app/src
 USER appuser
 EXPOSE 8001
 
-CMD ["sh", "-c", "uvicorn coa_ontology.main:app --host 0.0.0.0 --port ${PORT:-8001}"]
+# SERVICE_TLS_PORT is set only behind the internal ALB (service_discovery=alb):
+# serve_tls.py then serves HTTPS on that port for the ALB and plain HTTP on
+# 127.0.0.1:$PORT for the engine's own calls. Otherwise: unchanged.
+CMD ["sh", "-c", "if [ -n \"${SERVICE_TLS_PORT:-}\" ]; then exec python -m coa_ontology.serve_tls; else uvicorn coa_ontology.main:app --host 0.0.0.0 --port ${PORT:-8001}; fi"]

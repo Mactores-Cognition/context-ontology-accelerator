@@ -25,6 +25,21 @@ echo "[VKG] Bucket: ${ONTOLOGY_BUCKET}"
 echo "[VKG] S3 path: ${S3_PATH}/"
 echo "[VKG] API port: ${ENDPOINT_PORT}, Ontop port: ${ONTOP_PORT}"
 
+# --- TLS for the internal ALB (SERVICE_TLS=1, ALB mode only) ---
+# Self-signed certificate for the ALB -> container leg (the ALB does not validate
+# target certificates). translate-server.py serves TLS when both paths are set;
+# every facade start below inherits them.
+if [ "${SERVICE_TLS:-}" = "1" ]; then
+  TLS_DIR="${TLS_DIR:-/tmp/tls}"
+  mkdir -p "${TLS_DIR}"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=vkg" \
+    -keyout "${TLS_DIR}/key.pem" -out "${TLS_DIR}/cert.pem" >/dev/null 2>&1
+  chmod 600 "${TLS_DIR}/key.pem"
+  export SERVICE_TLS_CERT="${TLS_DIR}/cert.pem" SERVICE_TLS_KEY="${TLS_DIR}/key.pem"
+  echo "[VKG] TLS on: self-signed certificate for the internal ALB"
+fi
+# --- end TLS ---
+
 # Download all artifacts from S3 (with retry — transient S3 failures shouldn't
 # leave the container permanently degraded per REL11-BP03).
 echo "[VKG] Downloading artifacts..."

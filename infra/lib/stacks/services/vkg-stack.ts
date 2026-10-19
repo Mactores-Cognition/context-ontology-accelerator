@@ -132,8 +132,10 @@ export class VkgStack extends SCLStack {
     }
     // Callers rewrite vkg. -> vkg-{ns}. with Cloud Map; with the ALB they keep
     // this URL and send the namespace in the X-Coa-Namespace header.
+    // ALB mode is HTTPS-only: callers use the name in the private zone, which
+    // the ALB certificate covers.
     const vkgEndpoint = albMode
-      ? `http://${servicesAlb!.loadBalancerDnsName}:${this.containerPort}`
+      ? `https://vkg.${props.network.serviceTls!.domainName}:${this.containerPort}`
       : `http://vkg.${namespace!.namespaceName}:${this.containerPort}`;
 
     this.ontologyBucket = props.ontologyBucket;
@@ -196,6 +198,9 @@ export class VkgStack extends SCLStack {
         ONTOLOGY_PREFIX: "ontologies/",
         ENDPOINT_PORT: String(this.containerPort),
         ONTOP_JAVA_ARGS: ontopJavaArgs,
+        // ALB mode: entrypoint.sh makes a self-signed certificate and the
+        // facade serves HTTPS (the ALB does not validate target certificates).
+        ...(albMode && { SERVICE_TLS: "1" }),
       },
       portMappings: [
         {
@@ -209,7 +214,9 @@ export class VkgStack extends SCLStack {
       healthCheck: {
         command: [
           "CMD-SHELL",
-          `curl -sf http://localhost:${this.containerPort}/health || exit 1`,
+          albMode
+            ? `curl -sfk https://localhost:${this.containerPort}/health || exit 1`
+            : `curl -sf http://localhost:${this.containerPort}/health || exit 1`,
         ],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(10),
@@ -245,7 +252,12 @@ export class VkgStack extends SCLStack {
       this.vkgListener = new elbv2.ApplicationListener(this, "VkgListener", {
         loadBalancer: servicesAlb!,
         port: this.containerPort,
-        protocol: elbv2.ApplicationProtocol.HTTP,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [
+          elbv2.ListenerCertificate.fromCertificateManager(
+            props.network.serviceTls!.certificate,
+          ),
+        ],
         open: false,
         defaultAction: elbv2.ListenerAction.fixedResponse(404, {
           contentType: "text/plain",

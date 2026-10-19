@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import threading
 import time
 import urllib.error
@@ -721,6 +722,24 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+def _make_server(port, host="0.0.0.0"):  # noqa: S104 — container port behind the VPC security group
+    """Create the facade server; serve TLS when SERVICE_TLS_CERT / SERVICE_TLS_KEY are set.
+
+    entrypoint.sh sets both behind the internal ALB (SERVICE_TLS=1, ALB mode only)
+    with a self-signed certificate; the ALB does not validate target certificates.
+    """
+    server = ThreadingHTTPServer((host, port), TranslateHandler)
+    certfile = os.environ.get("SERVICE_TLS_CERT", "")
+    keyfile = os.environ.get("SERVICE_TLS_KEY", "")
+    if certfile and keyfile:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(certfile, keyfile)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        logger.info("TLS on (internal ALB)")
+    return server
+
+
 def main():
     """Parse CLI args, load routing, start the health poller, and serve forever."""
     global _ontology_version, _ontop_port, _listen_port, _table_routing
@@ -744,8 +763,9 @@ def main():
     health_thread.start()
 
     # Bind to 0.0.0.0 — required for Docker container networking.
-    # Access is restricted by VPC security group (CIDR-only ingress on port 8080).
-    server = ThreadingHTTPServer(("0.0.0.0", _listen_port), TranslateHandler)
+    # Access is restricted by VPC security group (CIDR-only ingress on port 8080,
+    # or only from the internal ALB in ALB mode, where it is HTTPS).
+    server = _make_server(_listen_port)
     logger.info("Listening on port %d (Ontop on %d)", _listen_port, _ontop_port)
 
     try:

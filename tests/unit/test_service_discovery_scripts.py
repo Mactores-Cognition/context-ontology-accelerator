@@ -54,3 +54,16 @@ def test_destroy_step4_removes_alb_rules_and_target_groups() -> None:
 def test_destroy_step4_keeps_the_cloud_map_cleanup() -> None:
     step4 = _destroy_step4()
     assert "aws servicediscovery delete-service" in step4
+
+
+def test_deploy_passes_the_https_certificate_settings() -> None:
+    # HTTPS for the internal ALB (replace-cloud-map-notes.txt sections 14-15):
+    # private CA by default, or a public ACM certificate for a delegated domain.
+    text = (_SCRIPTS / "deploy.sh").read_text()
+    for env_var, context_key in (
+        ("SCL_SERVICE_CERT", "service_cert"),
+        ("SCL_SERVICE_DOMAIN", "service_domain"),
+        ("SCL_PUBLIC_ZONE_ID", "public_zone_id"),
+    ):
+        assert env_var in text, f"deploy.sh does not read {env_var}"
+        assert f"--context {context_key}=" in text, f"deploy.sh does not pass the {context_key} CDK context"

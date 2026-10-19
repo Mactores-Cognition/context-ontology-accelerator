@@ -48,7 +48,9 @@ import {
   isAlbServiceDiscovery,
   isDynamoDbMetadataStore,
   METADATA_STORE_DYNAMODB,
+  SERVICE_CA_CERT_PARAM_ENV,
   SERVICE_DISCOVERY_ALB,
+  serviceCaCertParamName,
 } from "../../context";
 
 export interface NamespaceDeletionPipelineProps {
@@ -150,6 +152,7 @@ export class NamespaceDeletionPipeline extends Construct {
     const albMode = isAlbServiceDiscovery(this.node);
     const cloudMapNamespaceId = albMode ? undefined : props.cloudMapNamespaceId;
     const vkgListenerArn = albMode ? props.vkgListenerArn : undefined;
+    const caCertParam = serviceCaCertParamName(this.node);
 
     const commonLambdaProps = {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -261,8 +264,20 @@ export class NamespaceDeletionPipeline extends Construct {
         ...(props.ontologyEngineEndpoint && {
           ONTOLOGY_ENGINE_ENDPOINT: props.ontologyEngineEndpoint,
         }),
+        // Private CA root for verifying ontology-engine's ALB certificate.
+        ...(caCertParam && { [SERVICE_CA_CERT_PARAM_ENV]: caCertParam }),
       },
     });
+    if (caCertParam) {
+      deleteOntologyFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:${cdk.Stack.of(this).partition}:ssm:${region}:${account}:parameter${caCertParam}`,
+          ],
+        }),
+      );
+    }
     if (props.ontologyBucketName) {
       deleteOntologyFn.addToRolePolicy(
         new iam.PolicyStatement({

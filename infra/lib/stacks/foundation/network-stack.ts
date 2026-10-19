@@ -4,15 +4,20 @@
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
 import * as servicediscovery from "aws-cdk-lib/aws-servicediscovery";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 import { SCLStack } from "../../constructs";
+import { ServiceTls } from "../../constructs/service-tls";
 import {
   isAlbServiceDiscovery,
   isDynamoDbMetadataStore,
   resolveContext,
+  resolveServiceTls,
+  serviceCaCertParamName,
 } from "../../context";
 import {
   JdbcConnectivity,
@@ -85,6 +90,13 @@ export class NetworkStack extends SCLStack {
    * `service_discovery=alb`.
    */
   public readonly servicesAlb?: elbv2.ApplicationLoadBalancer;
+
+  /**
+   * HTTPS for the internal ALB: Route 53 private zone (with ontology-engine
+   * and vkg records), and the certificate the HTTPS listeners use. Only with
+   * `service_discovery=alb`.
+   */
+  public readonly serviceTls?: ServiceTls;
 
   /** Security group for Glue Connections to reach source databases. */
   public readonly connectorSecurityGroup: ec2.SecurityGroup;
@@ -405,6 +417,7 @@ export class NetworkStack extends SCLStack {
     // ── Service discovery: Cloud Map namespace, or the internal ALB ────
     if (isAlbServiceDiscovery(this.node)) {
       this.servicesAlb = this.createServicesAlb();
+      this.serviceTls = this.createServiceTls(this.servicesAlb);
     } else {
       this.serviceNamespace = new servicediscovery.PrivateDnsNamespace(
         this,
@@ -539,12 +552,41 @@ export class NetworkStack extends SCLStack {
    * Listeners live in the stacks that own the targets: OntologyStack adds 8001
    * (default action: ontology-engine) and VkgStack adds 8080 (one rule per
    * namespace on the X-Coa-Namespace header, added at runtime by the reload
-   * Lambda). Plain HTTP inside the VPC, as with Cloud Map.
+   * Lambda). HTTPS on both legs: listeners use the createServiceTls certificate,
+   * targets serve TLS with a self-signed certificate.
    *
    * The idle timeout is 180 s because namespace delete's
    * `DELETE /ontologies?namespace=` call to ontology-engine is synchronous and
    * may take up to its 120 s client timeout; the 60 s default would cut it.
    */
+  /**
+   * Names and certificate for HTTPS on the internal ALB
+   * (replace-cloud-map-notes.txt section 14). Callers use
+   * `https://ontology-engine.<zone>:8001` and `https://vkg.<zone>:8080`; the
+   * certificate covers `*.<zone>`.
+   */
+  private createServiceTls(alb: elbv2.ApplicationLoadBalancer): ServiceTls {
+    const serviceTls = new ServiceTls(this, "ServiceTls", {
+      vpc: this.vpc,
+      settings: resolveServiceTls(this.node),
+      caCertParameterName: serviceCaCertParamName(this.node),
+    });
+    const target = route53.RecordTarget.fromAlias(
+      new route53Targets.LoadBalancerTarget(alb),
+    );
+    for (const [id, name] of [
+      ["OntologyEngineRecord", "ontology-engine"],
+      ["VkgRecord", "vkg"],
+    ]) {
+      new route53.ARecord(this, id, {
+        zone: serviceTls.zone,
+        recordName: name,
+        target,
+      });
+    }
+    return serviceTls;
+  }
+
   private createServicesAlb(): elbv2.ApplicationLoadBalancer {
     const albSecurityGroup = new ec2.SecurityGroup(this, "ServicesAlbSG", {
       vpc: this.vpc,

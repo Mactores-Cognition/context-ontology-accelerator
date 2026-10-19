@@ -90,6 +90,28 @@ export function resolveContext(node: Node): ResolvedContext {
   };
 }
 
+/** CDK context key that selects where table metadata is stored. */
+export const CTX_METADATA_STORE = "metadata_store";
+
+/**
+ * `metadata_store` value that stores table metadata in a DynamoDB table
+ * (TABLE_NAMES.METADATA_ASSETS) instead of a DataZone domain. Any other value,
+ * or none, keeps DataZone.
+ */
+export const METADATA_STORE_DYNAMODB = "dynamodb";
+
+/**
+ * Value published to `/{prefix}/smus/domain-id` when no DataZone domain is
+ * deployed (DynamoDB metadata store). Stacks still read that parameter, and
+ * scripts/destroy.sh skips domain deletion when it holds this value.
+ */
+export const NO_DATAZONE_DOMAIN = "NO_DATAZONE_DOMAIN";
+
+/** True when the `metadata_store` context selects the DynamoDB metadata store. */
+export function isDynamoDbMetadataStore(node: Node): boolean {
+  return node.tryGetContext(CTX_METADATA_STORE) === METADATA_STORE_DYNAMODB;
+}
+
 /** Return `{prefix}-{env}-{name}`. */
 export function prefixed(node: Node, name: string): string {
   const { prefix, envName } = resolveContext(node);

@@ -29,6 +29,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # SMUS admin principal(s) — required, comma-separated IAM role/user ARN(s)
 # that human admins federate into (e.g. your IAM Identity Center
 # permission-set role): SCL_SMUS_ADMIN_ARNS=arn:aws:iam::123456789012:role/... make deploy-dev
+# Table-metadata store (default DataZone). dynamodb stores it in a DynamoDB
+# table and deploys no DataZone domain, so no SMUS admin principal is needed:
+#   SCL_METADATA_STORE=dynamodb make deploy-dev
 CONTEXT="--context env=$ENV"
 [ -n "${SCL_PREFIX:-}" ]        && CONTEXT="$CONTEXT --context resource_prefix=$SCL_PREFIX"
 [ -n "${SCL_PROJECT_TAG:-}" ]   && CONTEXT="$CONTEXT --context project_tag=$SCL_PROJECT_TAG"
@@ -44,13 +47,17 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand=$SCL_NL2SQL_GRAPH_EXPAND"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand_max_tables=$SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES"
 [ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="$CONTEXT --context smus_admin_principal_arns=$SCL_SMUS_ADMIN_ARNS"
+[ -n "${SCL_METADATA_STORE:-}" ] && CONTEXT="$CONTEXT --context metadata_store=$SCL_METADATA_STORE"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
 # NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when
 # SCL_SMUS_ADMIN_ARNS is unset. Validate the fallback before CDK runs while
 # preserving the difference between missing credentials, access denial, service
-# failure, and a confirmed NoSuchEntity result.
-"$REPO_ROOT/scripts/check-smus-admin-principal.sh"
+# failure, and a confirmed NoSuchEntity result. Skipped with
+# SCL_METADATA_STORE=dynamodb: no DataZone domain, so no SMUS login role.
+if [ "${SCL_METADATA_STORE:-}" != "dynamodb" ]; then
+  "$REPO_ROOT/scripts/check-smus-admin-principal.sh"
+fi
 
 # ── Resolve VPC peering context from test-databases stack (if deployed) ──
 # Prefix default matches the CDK app (see DEFAULT_RESOURCE_PREFIX).

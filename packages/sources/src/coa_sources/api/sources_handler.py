@@ -48,6 +48,7 @@ from coa_common.constants import (
 from coa_common.dao import DynamoDBDAO
 from coa_common.dao.base import QueryParams
 from coa_common.logging import setup_logging
+from coa_common.metadata_store import metadata_store_configured
 from coa_common.response import api_response, iso_to_epoch
 from coa_control_plane_server.models.create_source_input import CreateSourceInput
 from coa_control_plane_server.models.extraction_config import ExtractionConfig
@@ -745,7 +746,7 @@ def _delete_source_datazone_assets(
     # (the SMUS client touches AWS config and slows cold starts otherwise).
     from .database_routes import _get_smus_client, _resolve_project_id
 
-    if not _SMUS_DOMAIN_ID:
+    if not metadata_store_configured(_SMUS_DOMAIN_ID):
         logger.info("datazone_asset_cleanup_skipped_no_domain", source_id=source_id)
         # No domain configured: nothing to clean, so nothing is left behind.
         return 0, True

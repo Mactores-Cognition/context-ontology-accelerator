@@ -3115,3 +3115,179 @@ describe("Athena catalog-name prefix budget", () => {
     ).toEqual([]);
   });
 });
+
+// ── DataZone / metadata-store wiring ────────────────────────────────────────
+//
+// Four Lambdas and the DB-enrichment container read or write table/column
+// metadata. In the default mode they reach DataZone (SMUS_DOMAIN_ID +
+// PROJECT_ACCESS_ROLE_ARN, and datazone:* on the sources-api role). In DynamoDB
+// mode (metadata_store=dynamodb) they use the metadata-assets table instead.
+
+/** The four Lambdas that read or write table/column metadata. */
+const METADATA_FUNCTIONS = [
+  "sources-db-connector",
+  "sources-bulk-review-worker",
+  "sources-delete-worker",
+  "sources-api",
+];
+
+/** Synthesise the sources stack with extra context. */
+function synthSources(extra: Record<string, unknown>, id: string): Template {
+  const app = new cdk.App({ context: { ...TEST_CONTEXT, ...extra } });
+  const network = new NetworkStack(app, `${id}Network`, { env: TEST_ENV });
+  const storage = new StorageStack(app, `${id}Storage`, {
+    network,
+    env: TEST_ENV,
+  });
+  return Template.fromStack(
+    new SourcesStack(app, `${id}Sources`, {
+      network,
+      storage,
+      allowedOrigin: "https://test.example.com",
+      env: TEST_ENV,
+    }),
+  );
+}
+
+/** The Lambda whose FunctionName ends with `-${suffix}`. */
+function lambdaBySuffix(t: Template, suffix: string): any {
+  const fn = Object.values(t.findResources("AWS::Lambda::Function")).find(
+    (f: any) => String(f.Properties?.FunctionName ?? "").endsWith(`-${suffix}`),
+  );
+  expect(fn).toBeDefined();
+  return fn;
+}
+
+/** IAM statements attached to the role of the Lambda ending `-${suffix}`. */
+function lambdaStatements(t: Template, suffix: string): any[] {
+  const roleId = lambdaBySuffix(t, suffix).Properties.Role["Fn::GetAtt"][0];
+  return Object.values(t.findResources("AWS::IAM::Policy"))
+    .filter((p: any) => p.Properties.Roles?.some((r: any) => r.Ref === roleId))
+    .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+}
+
+/** Environment of the DB-enrichment container, as a name -> value map. */
+function enrichmentContainerEnv(t: Template): Record<string, unknown> {
+  const container = Object.values(t.findResources("AWS::ECS::TaskDefinition"))
+    .flatMap((d: any) => d.Properties?.ContainerDefinitions ?? [])
+    .find((c: any) =>
+      String(c.Name ?? "").endsWith("sources-db-enrichment-agent"),
+    );
+  expect(container).toBeDefined();
+  return Object.fromEntries(
+    (container.Environment ?? []).map((e: any) => [e.Name, e.Value]),
+  );
+}
+
+const actionsOf = (s: any): string[] =>
+  Array.isArray(s.Action) ? s.Action : [s.Action];
+
+describe("SourcesStack in DynamoDB mode (metadata_store=dynamodb)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = synthSources({ metadata_store: "dynamodb" }, "Ddb");
+  });
+
+  it("DynamoDB mode: metadata Lambdas and the enrichment container select the DynamoDB backend", () => {
+    for (const suffix of METADATA_FUNCTIONS) {
+      expect(
+        lambdaBySuffix(template, suffix).Properties.Environment.Variables,
+      ).toMatchObject({
+        METADATA_STORE_BACKEND: "dynamodb",
+        METADATA_STORE_TABLE: expect.anything(),
+      });
+    }
+    expect(enrichmentContainerEnv(template)).toMatchObject({
+      METADATA_STORE_BACKEND: "dynamodb",
+      METADATA_STORE_TABLE: expect.anything(),
+    });
+  });
+
+  it("DynamoDB mode: no Lambda or container carries SMUS_DOMAIN_ID or PROJECT_ACCESS_ROLE_ARN", () => {
+    const lambdaVars = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ).map((f: any) => f.Properties?.Environment?.Variables ?? {});
+    const containerVars = Object.values(
+      template.findResources("AWS::ECS::TaskDefinition"),
+    )
+      .flatMap((d: any) => d.Properties?.ContainerDefinitions ?? [])
+      .map((c: any) =>
+        Object.fromEntries(
+          (c.Environment ?? []).map((e: any) => [e.Name, e.Value]),
+        ),
+      );
+    for (const vars of [...lambdaVars, ...containerVars]) {
+      expect(vars).not.toHaveProperty("SMUS_DOMAIN_ID");
+      expect(vars).not.toHaveProperty("PROJECT_ACCESS_ROLE_ARN");
+    }
+  });
+
+  it("DynamoDB mode: no IAM statement grants datazone:* actions", () => {
+    const dataZoneActions = Object.values(
+      template.findResources("AWS::IAM::Policy"),
+    )
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .flatMap(actionsOf)
+      .filter((a: string) => a.startsWith("datazone:"));
+    expect(dataZoneActions).toEqual([]);
+  });
+
+  it("DynamoDB mode: metadata Lambdas are granted DynamoDB access to the asset table", () => {
+    for (const suffix of METADATA_FUNCTIONS) {
+      const assetTableGrants = lambdaStatements(template, suffix).filter(
+        (s) =>
+          actionsOf(s).some((a) => a.startsWith("dynamodb:")) &&
+          JSON.stringify(s.Resource).includes("metadata-assets"),
+      );
+      expect(assetTableGrants.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("DynamoDB mode: the source-deletion worker gets the asset table instead of the project-access role", () => {
+    const vars = lambdaBySuffix(template, "sources-delete-worker").Properties
+      .Environment.Variables;
+    expect(vars).toMatchObject({
+      METADATA_STORE_TABLE: expect.stringContaining("metadata-assets"),
+    });
+    expect(vars).not.toHaveProperty("PROJECT_ACCESS_ROLE_ARN");
+  });
+});
+
+// Default mode: closes a coverage gap. Nothing above asserted the DataZone
+// wiring (SMUS_DOMAIN_ID / PROJECT_ACCESS_ROLE_ARN on these functions, or the
+// datazone:* statement on sources-api); these pin it so the DynamoDB-mode
+// change cannot silently alter the default.
+describe("SourcesStack DataZone wiring (default mode)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = synthSources({}, "Dz");
+  });
+
+  it("default mode: metadata Lambdas and the enrichment container carry SMUS_DOMAIN_ID and PROJECT_ACCESS_ROLE_ARN", () => {
+    for (const suffix of METADATA_FUNCTIONS) {
+      const vars = lambdaBySuffix(template, suffix).Properties.Environment
+        .Variables;
+      expect(vars).toHaveProperty("SMUS_DOMAIN_ID");
+      expect(vars).toHaveProperty("PROJECT_ACCESS_ROLE_ARN");
+    }
+    const containerVars = enrichmentContainerEnv(template);
+    expect(containerVars).toHaveProperty("SMUS_DOMAIN_ID");
+    expect(containerVars).toHaveProperty("PROJECT_ACCESS_ROLE_ARN");
+  });
+
+  it("default mode: the sources-api role is granted datazone:Search, GetAsset and DeleteAsset", () => {
+    const statement = lambdaStatements(template, "sources-api").find((s) =>
+      actionsOf(s).includes("datazone:Search"),
+    );
+    expect(statement).toBeDefined();
+    expect(actionsOf(statement)).toEqual(
+      expect.arrayContaining([
+        "datazone:Search",
+        "datazone:GetAsset",
+        "datazone:DeleteAsset",
+      ]),
+    );
+  });
+});

@@ -231,10 +231,8 @@ VPC-wide. This matches `NamespaceStack`/`ServeStack`/`McpStack`/`DataLayerStack`
   `dropInvalidHeaderFields: true`, `ipAddressType: DUAL_STACK` (keeps the
   existing AAAA alias record honest — an IPv4-only ALB with an AAAA record
   resolves to an empty answer and breaks IPv6-only clients),
-  `logAccessLogs(new AccessLogsBucket(this, "AlbAccessLogs", { nameSuffix: "alb-logs" }).bucket, "alb/")`
-  — leave `objectOwnership` unset; ALB delivery wants ACLs disabled, unlike the
-  CloudFront-legacy case at `public-ui-construct.ts:275-278`. Do not hand-roll
-  the bucket policy; `logAccessLogs` attaches the right principal.
+  and **no S3 access logging** — see deviation 10 below; `logAccessLogs()`
+  cannot work in an environment-agnostic stack.
 - **Listeners**: cert present → HTTPS:443 with the cert **and
   `sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS13`** (CDK otherwise defaults to
   `ELBSecurityPolicy-2016-08`, which permits TLS 1.0/1.1 — a silent downgrade
@@ -652,8 +650,8 @@ CloudFront replacement except Cognito sign-in.
    header.
 5. `curl -I http://<ui-domain>/` → 301 to HTTPS.
 6. `aws wafv2 get-web-acl-for-resource --resource-arn <alb-arn>` returns
-   `coa-dev-ui-waf`; `aws s3 ls s3://coa-dev-alb-logs-<acct>/alb/` populates
-   within ~5 min.
+   `coa-dev-ui-waf`. For request logs, read the nginx access log in CloudWatch:
+   `aws logs tail /ecs/coa-dev-web --follow`.
 7. Cognito app client `CallbackURLs` contains `https://<ui-domain>/authenticate/`
    plus `http://localhost:5173/authenticate/` in dev.
 8. `/system-health` and one Playground query succeed (the API CORS patch landed
@@ -728,3 +726,18 @@ Run `make setup`, then the commands in the Verification section above. Treat the
 first `docker build` and the first `cdk synth` as the real review of this change;
 the `apk add aws-cli` line and the nginx config are the two places most likely to
 need a correction.
+10. **The UI ALB has no S3 access logging.** The plan called for an
+   `AccessLogsBucket` wired via `logAccessLogs()`, but that resolves the
+   regional ELB log-delivery account at synth time and **every stack in this app
+   is environment-agnostic** — nothing passes `env`, in `bin/app.ts` or
+   `SCLStack` — so `stack.region` is an `AWS::Region` token and CDK throws
+   `RegionRequiredEnableBvAccess`. This failed 27 tests and would have failed
+   `cdk synth` identically.
+   Dropped rather than fixed by pinning the stack to a concrete region, which
+   would cost the app its portable templates and risk agnostic-to-concrete
+   cross-stack reference errors against `NetworkStack`. Request logging is
+   retained: nginx writes one access-log line per request to stdout and the
+   awslogs driver ships it to `/ecs/{prefix}-{env}-web`. What is lost is the
+   ALB-level record — TLS version, target processing time, ELB status versus
+   target status — and the S3 copy. Re-add by giving the web stack a concrete
+   `env` and guarding for credentialless CI synth.

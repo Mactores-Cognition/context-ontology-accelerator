@@ -563,14 +563,13 @@ describe("WebStack listener modes", () => {
     );
   });
 
-  test("the ALB is internet-facing, logging, and drops bad headers", () => {
+  test("the ALB is internet-facing and drops invalid headers", () => {
     const template = render("TestWebScheme", true);
     template.hasResourceProperties(
       "AWS::ElasticLoadBalancingV2::LoadBalancer",
       Match.objectLike({
         Scheme: "internet-facing",
         LoadBalancerAttributes: Match.arrayWith([
-          { Key: "access_logs.s3.enabled", Value: "true" },
           {
             Key: "routing.http.drop_invalid_header_fields.enabled",
             Value: "true",

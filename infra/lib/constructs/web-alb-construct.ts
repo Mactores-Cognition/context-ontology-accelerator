@@ -12,7 +12,6 @@ import { Construct } from "constructs";
 import { RuntimeConfig } from "@coa/shared";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
 
-import { AccessLogsBucket } from "./access-logs-bucket";
 import { buildContentSecurityPolicy } from "./content-security-policy";
 import { SCLConstruct } from "./scl-construct";
 import { WafWebAcl } from "./waf-web-acl";
@@ -144,10 +143,14 @@ export class WebAlbConstruct extends SCLConstruct {
     });
 
     // ── Load balancer ─────────────────────────────────────────────────
-    const albAccessLogs = new AccessLogsBucket(this, "AlbAccessLogs", {
-      nameSuffix: "alb-logs",
-    });
-
+    // No S3 access logging: logAccessLogs() resolves the regional ELB
+    // log-delivery account at synth time, and every stack in this app is
+    // environment-agnostic (nothing passes `env`), so stack.region is a token
+    // and it throws RegionRequiredEnableBvAccess. Request logging is not lost —
+    // nginx writes one access-log line per request to stdout and the awslogs
+    // driver ships it to /ecs/{prefix}-{env}-web. Enabling ALB logs would mean
+    // pinning this stack to a concrete region, costing the app its portable
+    // templates.
     this.loadBalancer = new elbv2.ApplicationLoadBalancer(this, "Alb", {
       loadBalancerName: this.prefixed("web-alb"),
       vpc,
@@ -158,7 +161,6 @@ export class WebAlbConstruct extends SCLConstruct {
       // IPv4 only: a dual-stack ALB requires an IPv6 CIDR on the VPC, which
       // NetworkStack does not allocate. WebStack creates an A record only.
     });
-    this.loadBalancer.logAccessLogs(albAccessLogs.bucket, "alb");
 
     this.siteUrl = props.uiDomainName
       ? `https://${props.uiDomainName}`

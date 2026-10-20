@@ -99,7 +99,7 @@ base URL falls back to the local dev server):
 
 | Variable       | Required            | Description                                                                                    |
 | -------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
-| `E2E_BASE_URL` | Yes (for real runs) | Deployed web app URL, e.g. `https://<id>.cloudfront.net`. Defaults to `http://localhost:5173`. |
+| `E2E_BASE_URL` | Yes (for real runs) | Deployed web app URL, e.g. `https://coa.example.com`. Defaults to `http://localhost:5173`. |
 | `E2E_USERNAME` | Yes                 | Cognito test user email                                                                        |
 | `E2E_PASSWORD` | Yes                 | Cognito test user password                                                                     |
 
@@ -327,11 +327,35 @@ function MyComponent() {
 
 ## Deployment
 
-The build output (`dist/`) is a static SPA. Serve it behind CloudFront or any static host. Key deployment requirements:
+The build output (`dist/`) is baked into a container image (`Dockerfile`) that serves
+it with nginx on ECS Fargate behind an ALB. `pnpm build` must run first — the
+Dockerfile only copies `dist/`, and `infra/project.json` wires that ordering.
 
-1. Serve `runtime-config.json` alongside the static assets (environment-specific, not baked into the build)
-2. Configure SPA fallback routing (all paths → `index.html`)
-3. Set CORS on the API Gateway to allow the app's origin
+The image is environment-agnostic; the deployment supplies:
+
+| Variable              | Purpose                                                         |
+| --------------------- | --------------------------------------------------------------- |
+| `RUNTIME_CONFIG_JSON` | Written to the web root as `runtime-config.json` at start-up     |
+| `CSP_HEADER`          | Content-Security-Policy, built by the CDK construct              |
+| `INSECURE_TRANSPORT`  | Set when the ALB has no certificate; drops HSTS                  |
+| `UI_CONTENT_BUCKET`   | Optional operator drop-ins, synced into `questions/` at start-up |
+
+`nginx/` holds the serving config: SPA fallback (all paths → `index.html`),
+`/health` for the ALB target group, immutable caching for `/assets/`, `no-store`
+for `index.html` and `runtime-config.json`, and the security headers.
+
+Run it locally against the real config:
+
+```bash
+pnpm build
+docker build -t coa-web-app:local .
+docker run --rm -p 8080:8080   -e RUNTIME_CONFIG_JSON="$(cat public/runtime-config.json)"   -e CSP_HEADER="default-src 'self'" -e INSECURE_TRANSPORT=1   coa-web-app:local
+```
+
+> nginx inherits `add_header` only when a `location` declares none of its own, so
+> every `location` that sets a header must `include` both header snippets. Check
+> with `curl -I` across `/`, `/index.html`, `/runtime-config.json`, `/assets/...`
+> and a deep SPA route after changing `nginx/`.
 
 ## Path Aliases
 

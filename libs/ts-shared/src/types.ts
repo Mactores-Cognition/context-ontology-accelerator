@@ -4,10 +4,12 @@
 /**
  * Runtime configuration delivered to the frontend at deploy time.
  *
- * - **CloudFront mode**: written as `runtime-config.json` to S3.
- * - **ECS mode**: passed as the `RUNTIME_CONFIG_JSON` environment variable.
+ * Passed to the UI container as the `RUNTIME_CONFIG_JSON` environment variable
+ * and written to the webroot as `runtime-config.json` at start-up. The web-app
+ * fetches it at mount; CDK supplies the value during deployment.
  *
- * The web-app fetches this at startup; CDK writes it during deployment.
+ * Never put secrets here: it is served to the browser and is readable via
+ * `ecs:DescribeTaskDefinition`.
  */
 export interface RuntimeConfig {
   readonly region: string;

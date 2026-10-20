@@ -64,8 +64,8 @@ describe("WafWebAcl", () => {
 
   it("honors a custom rate limit", () => {
     const template = mkTemplate({
-      scope: "CLOUDFRONT",
-      namePrefix: "edge",
+      scope: "REGIONAL",
+      namePrefix: "ui",
       rateLimit: 500,
     });
     template.hasResourceProperties("AWS::WAFv2::WebACL", {

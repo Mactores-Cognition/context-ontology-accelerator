@@ -64,6 +64,9 @@ export const Paths = {
     "smithy-generated/openapi/openapi/DataLayerService.openapi.json",
   ),
 
+  /** Web app package root — Docker build context for the UI image. */
+  webApp: fromRoot("packages/web-app"),
+
   /** Web app dist directory (Vite build output). */
   webAppDist: fromRoot("packages/web-app/dist"),
 

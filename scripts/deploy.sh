@@ -12,9 +12,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Optional context overrides via environment variables:
 #   SCL_PREFIX=myproj  make deploy-dev
 #   SCL_VPC_ID=vpc-abc make deploy-dev
-# Custom domains (all-or-nothing — set all five or none):
-#   SCL_UI_DOMAIN, SCL_UI_CERT_ARN (us-east-1),
-#   SCL_API_DOMAIN, SCL_API_CERT_ARN (API region), SCL_HOSTED_ZONE_ID
+# Custom domains — two independent pairs, each all-or-nothing, plus an
+# independent hosted zone. Both certs must be in the DEPLOY region.
+# The UI pair is what gives the ALB an HTTPS listener; without it the UI is
+# served over plain HTTP (dev only, and Cognito sign-in will not work there):
+#   SCL_UI_DOMAIN + SCL_UI_CERT_ARN
+#   SCL_API_DOMAIN + SCL_API_CERT_ARN
+#   SCL_HOSTED_ZONE_ID
 # Database scan enrichment timeout (minutes; raise for very large sources):
 #   SCL_DB_SCAN_ENRICHMENT_TIMEOUT_MINUTES=180 make deploy-dev
 # Tier-1 curated metric SQL timeout (seconds; default 35):

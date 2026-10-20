@@ -21,7 +21,7 @@ export interface AccessLogsBucketProps {
   /**
    * Object ownership for the bucket. Leave unset (S3 default, ACLs disabled)
    * for S3 server access logging. Set `BUCKET_OWNER_PREFERRED` (ACLs enabled)
-   * for buckets that receive CloudFront **legacy** standard logs, which are
+   * for buckets that receive legacy log formats (e.g. CloudFront standard logs), which are
    * delivered via a bucket ACL grant.
    */
   readonly objectOwnership?: s3.ObjectOwnership;

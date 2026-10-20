@@ -11,9 +11,9 @@ export interface WafWebAclProps {
    * WAFv2 scope. `REGIONAL` for API Gateway / ALB / AppSync; `CLOUDFRONT` for
    * CloudFront distributions.
    *
-   * NOTE: a `CLOUDFRONT`-scope WebACL can only be created in `us-east-1` — the
-   * stack hosting this construct MUST be in that region when scope is
-   * `CLOUDFRONT` (see {@link EdgeWafStack}).
+   * NOTE: a `CLOUDFRONT`-scope WebACL can only be created in `us-east-1`, so
+   * the hosting stack MUST be in that region when scope is `CLOUDFRONT`.
+   * Nothing in this app uses that scope — both surfaces are REGIONAL.
    */
   readonly scope: "REGIONAL" | "CLOUDFRONT";
   /**
@@ -36,10 +36,10 @@ export interface WafWebAclProps {
  * A WAFv2 WebACL pre-configured with the AWS-managed **Common Rule Set**
  * (`AWSManagedRulesCommonRuleSet`) and a default `allow` action.
  *
- * Used to auto-provision baseline protection for a surface (API Gateway or
+ * Used to auto-provision baseline protection for a surface (the UI ALB or
  * CloudFront) when the deployer does not bring their own WebACL. The ACL's ARN
  * is exposed via {@link webAclArn} for association (`CfnWebACLAssociation` for
- * REGIONAL resources) or direct reference (CloudFront `webAclId`).
+ * REGIONAL resources).
  */
 export class WafWebAcl extends SCLConstruct {
   public readonly webAcl: wafv2.CfnWebACL;

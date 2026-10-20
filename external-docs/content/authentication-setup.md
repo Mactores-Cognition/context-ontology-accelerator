@@ -168,10 +168,12 @@ but for `make deploy-dev`, editing the SSM config is the only step required.
 ## Configure the Web App
 
 When you deploy with CDK, the web app's runtime configuration
-(`runtime-config.json`) is **generated and injected into S3 automatically** —
-no manual editing required. The `WebStack` builds it from the deployed stack
-outputs (OIDC authority, client ID, API endpoint, and region) so the React app
-discovers its backends without a rebuild:
+(`runtime-config.json`) is **generated automatically** — no manual editing
+required. The `WebStack` builds it from the deployed stack outputs (OIDC
+authority, client ID, API endpoint, and region), hands it to the UI container as
+the `RUNTIME_CONFIG_JSON` environment variable, and the container writes it to
+the web root at start-up, so the React app discovers its backends without a
+rebuild:
 
 ```json
 {
@@ -271,7 +273,7 @@ This walkthrough covers configuring Okta as the external OIDC identity provider 
 
 - An Okta tenant (e.g. `https://your-org.okta.com`)
 - Admin access to create applications and authorization servers in Okta
-- (Optional) Your Context Ontology Accelerator UI custom domain. If not using custom domains, you can update callback URLs after deployment using the generated CloudFront domain.
+- (Optional) Your Context Ontology Accelerator UI custom domain. If not using custom domains, you can update callback URLs after deployment using the UI URL from the stack outputs.
 
 ### Step 1: Create an Application in Okta
 
@@ -292,7 +294,7 @@ This walkthrough covers configuring Okta as the external OIDC identity provider 
 6. On the application page, note the **Client ID**
 
 !!! tip
-    If you don't have a custom domain yet, use placeholder URLs. After deployment, update with the CloudFront domain from the stack outputs.
+    If you don't have a custom domain yet, use placeholder URLs. After deployment, update them with the UI URL from the `coa-dev-web` stack's `WebsiteURL` output.
 
 !!! note "No client secret needed"
     Since the application type is **Single-Page Application**, Okta issues a
@@ -384,21 +386,27 @@ The `IdpAuthenticationStack` reads this config and wires the issuer URL + client
 
 If you used placeholder URLs, update them now:
 
-1. Get the CloudFront domain from stack outputs:
+1. Get the UI URL from stack outputs:
    ```bash
    aws cloudformation describe-stacks \
      --stack-name coa-dev-web \
-     --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" \
+     --query "Stacks[0].Outputs[?OutputKey=='WebsiteURL'].OutputValue" \
      --output text
    ```
 
+    !!! warning "The URL must be `https`"
+        Okta, like Cognito, rejects non-`localhost` `http` redirect URIs. If you
+        deployed without `SCL_UI_CERT_ARN` this output is an `http://` load-balancer
+        name and cannot be registered → redeploy with a certificate and domain.
+        See "UI hosting modes" in the deployment guide.
+
 2. **Update the Okta Application:**
-   - Sign-in redirect URI → `https://<CloudFront_URL>/authenticate/`
-   - Sign-out redirect URI → `https://<CloudFront_URL>/`
+   - Sign-in redirect URI → `<UI_URL>/authenticate/`
+   - Sign-out redirect URI → `<UI_URL>/`
 
 3. **Update the Authorization Server Audience:**
    - Navigate to **Security → API → Authorization Servers → your server**
-   - Set **Audience** to `https://<CloudFront_URL>`
+   - Set **Audience** to `<UI_URL>`
 
 ### Step 7: Verify
 

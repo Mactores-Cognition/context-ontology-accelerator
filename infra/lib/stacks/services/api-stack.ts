@@ -53,7 +53,7 @@ export const INTENTIONALLY_STUBBED = new Set([
 
 export interface ApiStackProps extends cdk.StackProps {
   /**
-   * CORS allowed origin for the API (e.g. `https://d2xw5y8g9akfew.cloudfront.net`).
+   * CORS allowed origin for the API (e.g. `https://coa.example.com`).
    * Defaults to `"*"` when no custom domain is configured (local dev).
    */
   readonly allowedOrigin: string;

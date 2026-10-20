@@ -101,6 +101,7 @@ openapitools.json
 
 # Agent orchestration metadata
 AGENT_CONTEXT.md
+CLAUDE.md
 
 # mise toolchain installs — CI sets MISE_INSTALL_PATH / MISE_DATA_DIR to
 # $CI_PROJECT_DIR/.mise (see .gitlab-ci.yml), so `mise install` writes the

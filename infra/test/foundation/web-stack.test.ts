@@ -2,16 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import * as cdk from "aws-cdk-lib";
+import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { Template, Match } from "aws-cdk-lib/assertions";
+import { Annotations, Match, Template } from "aws-cdk-lib/assertions";
 import { WebStack } from "../../lib/stacks/foundation";
 import {
   readRepoVersion,
   buildRuntimeConfig,
 } from "../../lib/stacks/foundation/web-stack";
 import { DEFAULT_RESOURCE_PREFIX } from "../../lib/constants";
+
+/**
+ * WebStack now needs a VPC for the ALB and the nginx service. A throwaway
+ * sibling stack keeps each test's VPC isolated; `maxAzs: 2` satisfies the
+ * construct's two-public-subnet requirement.
+ */
+function vpcFor(app: cdk.App, id: string): ec2.IVpc {
+  return new ec2.Vpc(new cdk.Stack(app, `${id}Net`), "Vpc", { maxAzs: 2 });
+}
+
+const UI_CERT = "arn:aws:acm:us-east-1:123456789012:certificate/ui-cert";
 
 const BASE_PROPS = {
   isCognitoMode: true,
@@ -32,7 +44,7 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
    * - a plain JSON **string** — when `siteUrl` has no runtime token (e.g. a
    *   static custom domain), CDK can fully resolve the value at synth time; or
    * - an `Fn::Join` of string literals + intrinsics (e.g. `Fn::GetAtt` for the
-   *   generated CloudFront domain) — when `siteUrl` depends on a token only
+   *   generated ALB domain) — when `siteUrl` depends on a token only
    *   known at deploy time.
    * Neither is safe to `JSON.parse` unconditionally (the Fn::Join form isn't
    * JSON), so normalize both into a searchable string: pass the plain string
@@ -55,7 +67,10 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
     });
     const template = Template.fromStack(
-      new WebStack(app, "TestWebDev", BASE_PROPS),
+      new WebStack(app, "TestWebDev", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebDev"),
+      }),
     );
 
     const customResource = Object.values(
@@ -72,7 +87,17 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "prod" },
     });
     const template = Template.fromStack(
-      new WebStack(app, "TestWebProd", BASE_PROPS),
+      new WebStack(app, "TestWebProd", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebProd"),
+        // A certificate is required for the patch to run at all: Cognito
+        // rejects http callback URLs, so the certless path deliberately skips
+        // it outside dev. prod always has a UI domain (bin/app.ts enforces it).
+        customDomain: {
+          uiDomainName: "app.example.com",
+          uiCertificateArn: UI_CERT,
+        },
+      }),
     );
 
     const customResource = Object.values(
@@ -89,7 +114,7 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
     // NOTE: unlike the pre-customDomain-feature behavior (a bare string that
     // short-circuited all patching), WebStack now always patches Cognito
     // callbacks — customDomain only changes the *siteUrl* used in those
-    // callbacks (custom UI domain vs. generated CloudFront domain). This test
+    // callbacks (custom UI domain vs. generated ALB domain). This test
     // guards that ExplicitAuthFlows parity (this suite's actual concern)
     // still holds when a custom domain is configured, not just the default path.
     const app = new cdk.App({
@@ -98,10 +123,10 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
     const template = Template.fromStack(
       new WebStack(app, "TestWebCustomDomain", {
         ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebCustomDomain"),
         customDomain: {
           uiDomainName: "app.example.com",
-          uiCertificateArn:
-            "arn:aws:acm:us-east-1:123456789012:certificate/ui-cert",
+          uiCertificateArn: UI_CERT,
           apiDomainName: "api.example.com",
           apiCertificateArn:
             "arn:aws:acm:us-east-1:123456789012:certificate/api-cert",
@@ -121,57 +146,72 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
   });
 });
 
-describe("WebStack CloudFront WAF WebACL", () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function crCall(cr: any): string {
-    const call = cr.Properties.Update ?? cr.Properties.Create;
-    return typeof call === "string" ? call : "";
-  }
-
-  test("uses a provided CloudFront WebACL ARN directly (no SSM reader)", () => {
+describe("WebStack UI WAF WebACL (REGIONAL, on the ALB)", () => {
+  test("associates a provided REGIONAL WebACL ARN and creates none", () => {
     const app = new cdk.App({
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
     });
-    const arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/byo-cf/def";
+    const arn =
+      "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/byo-ui/def";
     const template = Template.fromStack(
-      new WebStack(app, "TestWebByoWaf", { ...BASE_PROPS, webAclId: arn }),
+      new WebStack(app, "TestWebByoWaf", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebByoWaf"),
+        webAclArn: arn,
+      }),
     );
 
-    template.hasResourceProperties("AWS::CloudFront::Distribution", {
-      DistributionConfig: Match.objectLike({ WebACLId: arn }),
+    template.hasResourceProperties("AWS::WAFv2::WebACLAssociation", {
+      WebACLArn: arn,
     });
-    // No custom resource performs an SSM getParameter on the BYO path.
-    const readers = Object.values(template.findResources("Custom::AWS")).filter(
-      (cr) => crCall(cr).includes("getParameter"),
-    );
-    expect(readers).toHaveLength(0);
+    template.resourceCountIs("AWS::WAFv2::WebACL", 0);
   });
 
-  test("auto-create path reads the WebACL ARN from us-east-1 SSM via a custom resource", () => {
+  test("auto-creates a REGIONAL WebACL in-region, with no cross-region SSM read", () => {
+    // The CLOUDFRONT-scope ACL had to live in us-east-1 and was read back via a
+    // custom resource. A REGIONAL ACL is local, so that machinery must be gone.
     const app = new cdk.App({
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
     });
     const template = Template.fromStack(
       new WebStack(app, "TestWebAutoWaf", {
         ...BASE_PROPS,
-        autoWebAclParam: {
-          name: "/coa/edge/cloudfront-web-acl-arn",
-          region: "us-east-1",
-        },
+        vpc: vpcFor(app, "TestWebAutoWaf"),
       }),
     );
 
+    template.hasResourceProperties("AWS::WAFv2::WebACL", { Scope: "REGIONAL" });
+    template.resourceCountIs("AWS::WAFv2::WebACLAssociation", 1);
+
     const readers = Object.values(template.findResources("Custom::AWS")).filter(
       (cr) => {
-        const call = crCall(cr);
-        return (
-          call.includes("getParameter") &&
-          call.includes("/coa/edge/cloudfront-web-acl-arn") &&
-          call.includes("us-east-1")
-        );
+        const call = cr.Properties.Update ?? cr.Properties.Create;
+        return typeof call === "string" && call.includes("getParameter");
       },
     );
-    expect(readers).toHaveLength(1);
+    expect(readers).toHaveLength(0);
+  });
+});
+
+describe("WebStack (no CloudFront remains)", () => {
+  test("synthesizes no CloudFront resources at all", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebNoCf", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebNoCf"),
+      }),
+    );
+
+    const cloudfront = Object.keys(template.toJSON().Resources ?? {}).filter(
+      (k) =>
+        String(template.toJSON().Resources[k].Type).startsWith(
+          "AWS::CloudFront::",
+        ),
+    );
+    expect(cloudfront).toEqual([]);
   });
 });
 
@@ -241,42 +281,75 @@ describe("buildRuntimeConfig (version include/omit)", () => {
   });
 });
 
-describe("WebStack runtime-config.json artifact (end-to-end)", () => {
-  test("ships runtime-config.json carrying the repo VERSION", () => {
-    // Resolve the repo VERSION independently (no hardcoded value).
+/**
+ * Reads a container environment variable off the single task definition.
+ * Values carrying SSM/cross-stack Refs render as an Fn::Join, so return the
+ * raw value and let callers normalize.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function containerEnv(template: Template, name: string): any {
+  const taskDef = Object.values(
+    template.findResources("AWS::ECS::TaskDefinition"),
+  )[0];
+  const entry = taskDef.Properties.ContainerDefinitions[0].Environment.find(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (e: any) => e.Name === name,
+  );
+  expect(entry).toBeDefined();
+  return entry.Value;
+}
+
+/** Concatenate the literal parts of a plain string or an Fn::Join. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function joinLiterals(value: any): string {
+  if (typeof value === "string") return value;
+  const parts = value["Fn::Join"]?.[1] ?? [];
+  return parts.filter((p: unknown): p is string => typeof p === "string").join("");
+}
+
+describe("WebStack RUNTIME_CONFIG_JSON (end-to-end)", () => {
+  test("carries the repo VERSION to the container", () => {
+    // Previously asserted against the BucketDeployment asset on disk. The SPA
+    // is now baked into an image and the config arrives as an env var, so the
+    // env var IS the artifact.
     let dir = __dirname;
     while (!fs.existsSync(path.join(dir, "pnpm-workspace.yaml"))) {
       dir = path.dirname(dir);
     }
     const expected = fs.readFileSync(path.join(dir, "VERSION"), "utf-8").trim();
 
-    // Synth to a temp outdir and read the actual deploy artifact the
-    // BucketDeployment ships — the version lands in this asset, not the
-    // CloudFormation template, so this is the only place to assert the full
-    // WebStack → runtime-config.json path.
-    const outdir = fs.mkdtempSync(path.join(os.tmpdir(), "synth-"));
     const app = new cdk.App({
-      outdir,
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
     });
-    new WebStack(app, "TestWebArtifact", { isCognitoMode: true });
-    app.synth();
-
-    const configs: string[] = [];
-    const walk = (d: string) => {
-      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-        const p = path.join(d, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.name === "runtime-config.json")
-          configs.push(fs.readFileSync(p, "utf-8"));
-      }
-    };
-    walk(outdir);
-
-    expect(configs.length).toBeGreaterThan(0);
-    expect(configs.some((c) => c.includes(`"version":"${expected}"`))).toBe(
-      true,
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebArtifact", {
+        isCognitoMode: true,
+        vpc: vpcFor(app, "TestWebArtifact"),
+      }),
     );
+
+    expect(joinLiterals(containerEnv(template, "RUNTIME_CONFIG_JSON"))).toContain(
+      `"version":"${expected}"`,
+    );
+  });
+
+  test("resolves authority and clientId through CFN refs, not literals", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebArtifactRefs", {
+        isCognitoMode: true,
+        vpc: vpcFor(app, "TestWebArtifactRefs"),
+      }),
+    );
+
+    const value = containerEnv(template, "RUNTIME_CONFIG_JSON");
+    // An Fn::Join, not a plain string: the SSM-backed values are Refs.
+    expect(typeof value).not.toBe("string");
+    const literals = joinLiterals(value);
+    expect(literals).toContain('"authority":"');
+    expect(literals).toContain('"clientId":"');
   });
 });
 
@@ -284,14 +357,10 @@ describe("WebStack runtime-config.json artifact (end-to-end)", () => {
 // WebStack — CSP allowlists the Cognito hosted-UI domain (issue #130)
 // ═══════════════════════════════════════════════════════════════════
 describe("WebStack (CSP hosted-UI origin)", () => {
-  /** The synthesized CSP header value from the Response Headers Policy. */
+  /** The CSP handed to nginx via the container's CSP_HEADER env var. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function cspOf(template: Template): any {
-    const policy = Object.values(
-      template.findResources("AWS::CloudFront::ResponseHeadersPolicy"),
-    )[0];
-    return policy.Properties.ResponseHeadersPolicyConfig.SecurityHeadersConfig
-      .ContentSecurityPolicy.ContentSecurityPolicy;
+    return containerEnv(template, "CSP_HEADER");
   }
 
   test("the CSP is an Fn::Join carrying the hosted-UI host, resolved from SSM", () => {
@@ -303,7 +372,10 @@ describe("WebStack (CSP hosted-UI origin)", () => {
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "prod" },
     });
     const template = Template.fromStack(
-      new WebStack(app, "TestWebCsp", { isCognitoMode: true }),
+      new WebStack(app, "TestWebCsp", {
+        isCognitoMode: true,
+        vpc: vpcFor(app, "TestWebCsp"),
+      }),
     );
 
     const csp = cspOf(template);
@@ -326,7 +398,10 @@ describe("WebStack (CSP hosted-UI origin)", () => {
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "prod" },
     });
     const template = Template.fromStack(
-      new WebStack(app, "TestWebCspParam", { isCognitoMode: true }),
+      new WebStack(app, "TestWebCspParam", {
+        isCognitoMode: true,
+        vpc: vpcFor(app, "TestWebCspParam"),
+      }),
     );
 
     // `valueForStringParameter` renders as a CFN template Parameter of type
@@ -359,7 +434,10 @@ describe("WebStack (CSP hosted-UI origin)", () => {
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "prod" },
     });
     const template = Template.fromStack(
-      new WebStack(app, "TestWebCspOidc", { isCognitoMode: false }),
+      new WebStack(app, "TestWebCspOidc", {
+        isCognitoMode: false,
+        vpc: vpcFor(app, "TestWebCspOidc"),
+      }),
     );
 
     const csp = JSON.stringify(cspOf(template));
@@ -381,10 +459,219 @@ describe("WebStack (CSP hosted-UI origin)", () => {
     const template = Template.fromStack(
       new WebStack(app, "TestWebCspOverride", {
         isCognitoMode: true,
+        vpc: vpcFor(app, "TestWebCspOverride"),
         contentSecurityPolicy: custom,
       }),
     );
 
     expect(cspOf(template)).toBe(custom);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// WebStack — HTTPS vs plain-HTTP listener modes
+// ═══════════════════════════════════════════════════════════════════
+describe("WebStack listener modes", () => {
+  function render(id: string, cert: boolean, env = "dev"): Template {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env },
+    });
+    return Template.fromStack(
+      new WebStack(app, id, {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, id),
+        ...(cert && {
+          customDomain: {
+            uiDomainName: "app.example.com",
+            uiCertificateArn: UI_CERT,
+          },
+        }),
+      }),
+    );
+  }
+
+  test("with a cert: HTTPS listener pinned to a modern SSL policy", () => {
+    // CDK defaults to ELBSecurityPolicy-2016-08, which still allows TLS 1.0/1.1
+    // — a downgrade from CloudFront's TLS_V1_2_2021.
+    const template = render("TestWebHttps", true);
+    template.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::Listener",
+      Match.objectLike({
+        Port: 443,
+        Protocol: "HTTPS",
+        Certificates: [{ CertificateArn: UI_CERT }],
+        SslPolicy: Match.stringLikeRegexp("TLS13"),
+      }),
+    );
+  });
+
+  test("with a cert: port 80 redirects to HTTPS", () => {
+    const template = render("TestWebRedirect", true);
+    template.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::Listener",
+      Match.objectLike({
+        Port: 80,
+        DefaultActions: Match.arrayWith([
+          Match.objectLike({
+            Type: "redirect",
+            RedirectConfig: Match.objectLike({
+              Protocol: "HTTPS",
+              Port: "443",
+              StatusCode: "HTTP_301",
+            }),
+          }),
+        ]),
+      }),
+    );
+  });
+
+  test("without a cert: a single port-80 forwarding listener, no certificate", () => {
+    const template = render("TestWebHttp", false);
+    template.resourceCountIs("AWS::ElasticLoadBalancingV2::Listener", 1);
+    template.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::Listener",
+      Match.objectLike({
+        Port: 80,
+        Protocol: "HTTP",
+        Certificates: Match.absent(),
+        DefaultActions: Match.arrayWith([
+          Match.objectLike({ Type: "forward" }),
+        ]),
+      }),
+    );
+  });
+
+  test("without a cert: the CSP drops upgrade-insecure-requests", () => {
+    // On an http:// document that directive rewrites every asset request to
+    // https:// against a listener with no TLS, so the page loads nothing.
+    const http = render("TestWebHttpCsp", false);
+    expect(joinLiterals(containerEnv(http, "CSP_HEADER"))).not.toContain(
+      "upgrade-insecure-requests",
+    );
+    expect(containerEnv(http, "INSECURE_TRANSPORT")).toBe("1");
+
+    const https = render("TestWebHttpsCsp", true);
+    expect(joinLiterals(containerEnv(https, "CSP_HEADER"))).toContain(
+      "upgrade-insecure-requests",
+    );
+  });
+
+  test("without a cert: warns that HTTP is in use", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const stack = new WebStack(app, "TestWebHttpWarn", {
+      ...BASE_PROPS,
+      vpc: vpcFor(app, "TestWebHttpWarn"),
+    });
+    Annotations.fromStack(stack).hasWarning(
+      "*",
+      Match.stringLikeRegexp("plain HTTP"),
+    );
+  });
+
+  test("the ALB is internet-facing and drops invalid headers", () => {
+    const template = render("TestWebScheme", true);
+    template.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      Match.objectLike({
+        Scheme: "internet-facing",
+        LoadBalancerAttributes: Match.arrayWith([
+          {
+            Key: "routing.http.drop_invalid_header_fields.enabled",
+            Value: "true",
+          },
+        ]),
+      }),
+    );
+  });
+
+  test("the target group health-checks /health with a short dereg delay", () => {
+    const template = render("TestWebTg", true);
+    template.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::TargetGroup",
+      Match.objectLike({
+        Port: 8080,
+        Protocol: "HTTP",
+        TargetType: "ip",
+        HealthCheckPath: "/health",
+        TargetGroupAttributes: Match.arrayWith([
+          { Key: "deregistration_delay.timeout_seconds", Value: "10" },
+        ]),
+      }),
+    );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// WebStack — Cognito callbacks cannot be http:// at a non-localhost origin
+// ═══════════════════════════════════════════════════════════════════
+describe("WebStack Cognito callbacks by transport", () => {
+  function cognitoCall(template: Template): string | undefined {
+    const resources = Object.values(template.findResources("Custom::AWS"))
+      .map((cr) => cr.Properties.Update ?? cr.Properties.Create)
+      .map((call) =>
+        typeof call === "string"
+          ? call
+          : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ((call as any)["Fn::Join"]?.[1] ?? [])
+              .filter((p: unknown): p is string => typeof p === "string")
+              .join(""),
+      );
+    return resources.find((c) => c.includes("updateUserPoolClient"));
+  }
+
+  test("HTTP + dev registers localhost only, never the http ALB origin", () => {
+    // Cognito rejects non-localhost http callback URLs, so sending the ALB name
+    // fails the deploy with InvalidParameterException. Guard against that.
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebCbHttpDev", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebCbHttpDev"),
+      }),
+    );
+
+    const call = cognitoCall(template);
+    expect(call).toBeDefined();
+    expect(call).toContain("http://localhost:5173/authenticate/");
+    expect(call).not.toContain("elb.amazonaws.com");
+  });
+
+  test("HTTP + non-dev skips the patch rather than sending empty CallbackURLs", () => {
+    // Cognito also rejects an empty CallbackURLs when AllowedOAuthFlows is set.
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "test" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebCbHttpTest", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebCbHttpTest"),
+      }),
+    );
+
+    expect(cognitoCall(template)).toBeUndefined();
+  });
+
+  test("HTTPS registers the custom domain callback", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebCbHttps", {
+        ...BASE_PROPS,
+        vpc: vpcFor(app, "TestWebCbHttps"),
+        customDomain: {
+          uiDomainName: "app.example.com",
+          uiCertificateArn: UI_CERT,
+        },
+      }),
+    );
+
+    expect(cognitoCall(template)).toContain(
+      "https://app.example.com/authenticate/",
+    );
   });
 });

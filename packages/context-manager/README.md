@@ -20,11 +20,9 @@ Bidirectional streaming endpoint for the Playground UI. Maintains a persistent c
 
 | Access Method | URL | Use Case |
 |---------------|-----|----------|
-| CloudFront (browser) | `wss://<CloudFrontDomain>/ws` | Playground UI in public deployment mode |
-| ALB (VPC-internal) | `ws://<AlbDnsName>/ws` | Services within VPC or private deployment mode |
 | Direct VPC endpoint | `wss://bedrock-agentcore.<region>.amazonaws.com/runtimes/<arn>/ws` | Backend services with VPC access |
 
-> **Note:** Browser clients cannot access the VPC endpoint directly. Use the CloudFront or ALB route. Obtain `AlbDnsName` from the `coa-dev-serve` CDK stack output.
+> **Note:** The browser calls this endpoint directly; it is allowlisted in the SPA's Content-Security-Policy. The UI load balancer serves static assets only and does not proxy the runtime.
 
 **Authentication:** JWT Access Token via `Authorization: Bearer <token>` header. See [infra/README.md](../../infra/README.md#serve-stack-coa-dev-serve) for auth configuration details. User identity (`sub` claim) scopes sessions — each user gets isolated conversation history per namespace. Unauthenticated connections can still send single-turn queries but won't have session persistence.
 
@@ -298,7 +296,7 @@ The buckets are independent: exhausting the query bucket does not affect action 
 
 **3. Structural validation** (query messages only): Handled downstream by Pydantic's `InvokeRequest` model, which validates required fields, patterns, and lengths with field-level error detail. The guard does not duplicate schema validation (single source of truth principle).
 
-**Design rationale:** Rate limiting is proportional to cost. Queries trigger the full orchestrator pipeline (multiple backend services, seconds of compute). Actions are O(1) operations (DynamoDB read/write, in-memory pong). Applying the same strict limit to both would degrade UX during reconnect scenarios without meaningful security benefit, since the connection is already authenticated via Bearer token at the CloudFront/ALB layer.
+**Design rationale:** Rate limiting is proportional to cost. Queries trigger the full orchestrator pipeline (multiple backend services, seconds of compute). Actions are O(1) operations (DynamoDB read/write, in-memory pong). Applying the same strict limit to both would degrade UX during reconnect scenarios without meaningful security benefit, since the connection is already authenticated via Bearer token.
 
 ### Row Limit Enforcement
 

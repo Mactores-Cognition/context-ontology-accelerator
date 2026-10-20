@@ -169,14 +169,14 @@ describe("StorageStack", () => {
       const storage = new StorageStack(app, "TestStorage2", {
         network,
         env: TEST_ENV,
-        allowedOrigin: "https://example.cloudfront.net",
+        allowedOrigin: "https://coa.example.com",
       });
       Template.fromStack(storage).hasResourceProperties("AWS::S3::Bucket", {
         BucketName: Match.stringLikeRegexp("ontology-artifacts-"),
         CorsConfiguration: {
           CorsRules: Match.arrayWith([
             Match.objectLike({
-              AllowedOrigins: ["https://example.cloudfront.net"],
+              AllowedOrigins: ["https://coa.example.com"],
             }),
           ]),
         },

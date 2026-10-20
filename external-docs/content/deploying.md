@@ -138,7 +138,7 @@ constraints in practice — if either is missing, the region is not usable.
 | **Amazon Athena** (incl. federated query) | SQL over mapped data sources | [Endpoints and quotas](https://docs.aws.amazon.com/general/latest/gr/athena.html) |
 
 The remaining services the solution uses — Lambda, API Gateway, ECS on Fargate, S3, DynamoDB,
-Cognito, CloudFront, WAF, Glue, Step Functions, SSM, CloudWatch — are available in effectively all
+Cognito, ELB, WAF, Glue, Step Functions, SSM, CloudWatch — are available in effectively all
 commercial regions and are not usually the limiting factor. That list is not exhaustive; for the
 complete inventory, including the services that are only called at run time rather than provisioned
 by the deploy, see [Appendix A: AWS Service Inventory](#appendix-a-aws-service-inventory-quotas-and-considerations).
@@ -247,9 +247,9 @@ setting these: `aws bedrock list-inference-profiles` and `aws bedrock list-found
 
 These apply **no matter which region you deploy to**:
 
-- **`us-east-1` is always involved.** CloudFront-scope WAF WebACLs and CloudFront ACM certificates
-  exist only in `us-east-1`, so the `*-edge-waf` stack always deploys there and `uiCertificateArn`
-  must be a `us-east-1` certificate. Amazon ECR Public is likewise `us-east-1`-only (build-time).
+- **Everything deploys to one region.** The UI load balancer terminates TLS with a certificate in
+  your **deploy** region and its WAF WebACL is `REGIONAL`, so there is no us-east-1 stack. Amazon ECR
+  Public is still `us-east-1`-only, but that is build-time only (pulling base images).
 - **Availability Zones can be restricted within a region.** A service being present in a region does
   not mean it is present in every AZ of that region. In `us-east-1`, AgentCore Runtime supports only
   3 of 6 AZs and the OpenSearch Serverless VPC endpoint is offered in a different subset, so
@@ -267,17 +267,10 @@ If this is the first CDK deployment to the account/region:
 npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
 ```
 
-!!! warning "Deploying outside `us-east-1` needs TWO bootstraps"
-    The `*-edge-waf` stack always deploys to `us-east-1` (CloudFront-scope WAF WebACLs and CloudFront
-    ACM certificates exist only there — see "Cross-region and AZ constraints" above), so that region
-    must be bootstrapped as well or the deploy fails partway through on that stack:
-
-    ```bash
-    npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>       # your deploy region
-    npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1      # always required — edge-waf stack
-    ```
-
-    Preflight checks both and fails fast if either is missing.
+!!! note "One region is enough"
+    Preflight checks this and fails fast if it is missing. Earlier releases also required a
+    second bootstrap in `us-east-1` for a CloudFront-scope WAF WebACL; that stack no longer
+    exists, so only your deploy region needs bootstrapping.
 
 
 ## Installation
@@ -330,12 +323,11 @@ This runs `scripts/deploy.sh` which:
 | `coa-dev-serve` | Context Manager (query orchestration) |
 | `coa-dev-sources` | Data source ingestion (Glue, JDBC) |
 | `coa-dev-data-layer` | REST API for queries |
-| `coa-dev-edge-waf` | CloudFront WAF WebACL (us-east-1, auto-created unless an existing ARN is supplied) |
-| `coa-dev-web` | CloudFront + S3 (React frontend) |
+| `coa-dev-web` | ALB + ECS Fargate (nginx serving the React frontend), REGIONAL WAF WebACL |
 | `coa-dev-ontology` | Ontology engine (induction, reasoning) |
 | `coa-dev-mcp` | MCP Server on AgentCore Runtime |
 
-Total fresh deploy: **~1.5 hours** for CDK/CloudFormation provisioning of all 16 stacks, once dependencies are installed and Smithy artifacts are generated. Neptune and OpenSearch Serverless provisioning, AgentCore Runtime setup, and cross-stack SSM dependency waits account for most of that time — individual stacks vary widely and several run in parallel, so a per-stack breakdown understates the real end-to-end wall-clock time. CDK resolves the deploy order automatically from the dependency graph declared in `bin/app.ts` — you don't need to deploy stacks individually or in this order by hand.
+Total fresh deploy: **~1.5 hours** for CDK/CloudFormation provisioning of all 15 stacks, once dependencies are installed and Smithy artifacts are generated. Neptune and OpenSearch Serverless provisioning, AgentCore Runtime setup, and cross-stack SSM dependency waits account for most of that time — individual stacks vary widely and several run in parallel, so a per-stack breakdown understates the real end-to-end wall-clock time. CDK resolves the deploy order automatically from the dependency graph declared in `bin/app.ts` — you don't need to deploy stacks individually or in this order by hand.
 
 !!! warning "First-time setup adds significant time"
     The ~1.5 hour figure above is CDK/CloudFormation provisioning time only. On a fresh machine or first-time deploy, budget additional time on top of that for: installing `mise`-managed toolchains, `uv sync`/`pnpm install`, Smithy/Gradle codegen (`make generate` — first run downloads Gradle wrappers, openapi-generator, and builds TypeScript clients from scratch), Docker image builds, and CDK bootstrap. Subsequent deploys after initial setup are faster since dependencies and generated artifacts are cached, though CloudFormation provisioning time for a fresh set of stacks remains similar.
@@ -407,18 +399,73 @@ SCL_VPC_ID=vpc-abc123 make deploy-dev
 SCL_SMUS_ADMIN_ARNS=arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/us-east-1/AWSReservedSSO_AdministratorAccess_abc123 \
 make deploy-dev
 
-# Custom domain for the web app and API — all five are required together
-# (all-or-nothing; CDK fails synth if only some are set)
+# Custom domain for the web app and API. Two independent pairs plus an
+# independent hosted zone; each pair is all-or-nothing. Supplying the UI pair
+# is what gives the load balancer an HTTPS listener (see "UI hosting modes").
 SCL_UI_DOMAIN=ontology.example.com \
-SCL_UI_CERT_ARN=arn:aws:acm:us-east-1:123456789012:certificate/ui-cert-id \
+SCL_UI_CERT_ARN=arn:aws:acm:us-west-2:123456789012:certificate/ui-cert-id \
 SCL_API_DOMAIN=api.ontology.example.com \
 SCL_API_CERT_ARN=arn:aws:acm:us-west-2:123456789012:certificate/api-cert-id \
 SCL_HOSTED_ZONE_ID=Z0123456789ABCDEFGHIJ \
 make deploy-dev
 ```
 
+#### UI hosting modes
+
+The console is served by nginx on ECS Fargate behind an Application Load
+Balancer. CloudFront is not used, so there is no AWS-provided TLS hostname —
+whether you supply a certificate decides the mode:
+
+| | `SCL_UI_DOMAIN` + `SCL_UI_CERT_ARN` set | Neither set |
+|---|---|---|
+| Listener | HTTPS:443, with HTTP:80 redirecting to it | HTTP:80 only |
+| Origin | `https://<your-domain>` | `http://<alb-dns-name>` |
+| Cognito sign-in | Works | **Unavailable** (see below) |
+| Suitable for | Any real environment | Dev smoke-testing only |
+
+Without a certificate the deploy still succeeds and the console loads: SPA
+routing, `runtime-config.json`, the security headers and the whole
+ALB → ECS → WAF path are all exercised. CDK emits a synth-time warning.
+
+What does **not** work on plain HTTP is Cognito sign-in at the load-balancer
+origin. Cognito only accepts `https` callback URLs, with `http://localhost` the
+single exception, so `http://<alb-dns>/authenticate/` cannot be registered at
+all. On that path the deployment registers only the localhost callback (in
+`dev`) and skips the callback patch entirely otherwise. Two ways to exercise
+auth without buying a domain:
+
+1. Run the UI locally with `make web-dev` (`http://localhost:5173`) against the
+   deployed API — the localhost callback is already registered in `dev`.
+2. Import any certificate into ACM, including a self-signed one, and pass its
+   ARN. Cognito only checks the scheme, so a one-time browser click-through on
+   the untrusted-CA warning gets you the full flow.
+
+`prod` refuses to deploy without a UI custom domain regardless.
+
+#### Example prompts for the Playground (optional)
+
+The `web` stack creates a `{prefix}-{env}-ui-content-{account}-{region}` bucket.
+Drop a file at `questions/<namespaceId>.json` and the Playground shows those
+prompts as clickable chips:
+
+```json
+{ "questions": [{ "label": "Top customers", "question": "Who are our top 10 customers by revenue?" }] }
+```
+
+```bash
+aws s3 cp questions.json s3://coa-dev-ui-content-<account>-<region>/questions/<namespaceId>.json
+aws ecs update-service --cluster coa-dev-web-cluster --service coa-dev-web --force-new-deployment
+```
+
+The bucket is synced into the container at task start, so a new deployment is
+needed to pick up changes — no image rebuild. Files committed to
+`packages/web-app/public/questions/` are baked into the image instead. The file
+is entirely optional; absent it, the Playground shows no sample prompts.
+
 !!! note "Custom domain certificate regions"
-    `SCL_UI_CERT_ARN` must be an ACM certificate in `us-east-1` (CloudFront requirement) regardless of your deploy region. `SCL_API_CERT_ARN` must be in the same region you're deploying to (API Gateway requirement). CDK validates both at synth time and fails fast with a clear error if either is in the wrong region.
+    **Both** certificates must be in the region you are deploying to: `SCL_UI_CERT_ARN` terminates TLS on the UI load balancer and `SCL_API_CERT_ARN` on API Gateway, neither of which is global. A single wildcard certificate can cover both. CDK validates each at synth time and fails fast if it is in the wrong region.
+
+    The two pairs are independent: supply `SCL_UI_DOMAIN` + `SCL_UI_CERT_ARN` without the API pair if you only want UI TLS, and `SCL_HOSTED_ZONE_ID` only if you want CDK to create the alias record.
 
 !!! warning "Multi-region deployments"
     S3 buckets and IAM roles are globally scoped, not region-isolated. Deploying the same `SCL_PREFIX` + `env` to a second region **will collide** with an existing deployment. Use a distinct `SCL_PREFIX` per region (e.g., `coa-w2` for `us-west-2`) — do not rely on region alone to disambiguate.
@@ -628,7 +675,7 @@ are defined in `infra/lib/constants.ts`.
 
 | Layer | Default | Applies to |
 |-------|---------|------------|
-| WAF per-IP rate limit | **2000 requests / 5 min per source IP** (block) | Every request, at the edge (CloudFront) and API (before auth) |
+| WAF per-IP rate limit | **2000 requests / 5 min per source IP** (block) | Every request, at the UI load balancer and API (before auth) |
 | API Gateway stage-wide throttle | **50 rps / 100 burst** | All API methods |
 | API Gateway per-operation throttle | **5 rps / 10 burst** | Expensive, job-launching operations only |
 
@@ -659,9 +706,9 @@ write):
   disables the rate rule (used when bringing your own WebACL — see below).
 
 To bring an entirely pre-built WebACL instead of the auto-created one, set the
-`api_web_acl_id` (REGIONAL, API stage) or `cloudfront_web_acl_id` (CloudFront
-edge) CDK context value; the `WafWebAcl` construct — and its rate rule — is then
-skipped entirely for that surface.
+`api_web_acl_id` (API stage) or `ui_web_acl_id` (UI load balancer) CDK context
+value; the `WafWebAcl` construct — and its rate rule — is then skipped entirely
+for that surface. Both must be **REGIONAL**-scope ARNs in the deploy region.
 
 **When to tune for production.** The defaults suit a modest authenticated-user
 population. Raise the stage-wide and per-operation throttles if legitimate
@@ -672,9 +719,9 @@ concurrent usage triggers 429s; raise the WAF limit if a shared-egress client
 
 - API Gateway `4XXError` metric — includes HTTP **429 Too Many Requests**
   returned when a caller exceeds a throttle (the burst bucket is empty).
-- WAF `BlockedRequests` metric, rule `{prefix}-{env}-{api|cloudfront}-waf-rate-limit-per-ip`
+- WAF `BlockedRequests` metric, rule `{prefix}-{env}-{api|ui}-waf-rate-limit-per-ip`
   — counts IPs blocked by the rate-based rule (the API stage WebACL uses the
-  `api` prefix, the CloudFront edge WebACL uses `cloudfront`).
+  `api` prefix, the UI load balancer WebACL uses `ui`).
 
 A client receiving **HTTP 429** should back off and retry with jitter; the limit
 is per-second steady-state with a short burst allowance, so a brief pause clears
@@ -740,7 +787,7 @@ The User Pool ID is in the `coa-dev-auth` stack outputs or SSM at `/<prefix>/use
 
 ### 2. Access the Web App
 
-The web app URL is in the `coa-dev-web` stack's CloudFormation output (`WebAppUrl`). Sign in with the Cognito user you created (or your external IdP's credentials, if using OIDC mode).
+The web app URL is in the `coa-dev-web` stack's CloudFormation output (`WebsiteURL`; `LoadBalancerDnsName` gives the raw ALB hostname). Sign in with the Cognito user you created (or your external IdP's credentials, if using OIDC mode).
 
 ### 3. Grant Platform Admin
 
@@ -1260,8 +1307,9 @@ mapping if a stack has since been refactored.
 | **Amazon DataZone** / SageMaker Unified Studio | Namespace domain, projects, data-asset catalog | `namespace` |
 | **Amazon API Gateway** | REST API surface, authorizer, per-route throttles | `api` |
 | **Amazon Cognito** | Default identity provider (skipped in OIDC mode) | `auth` |
-| **AWS WAF** (WAFv2) | Per-IP rate limiting at the edge and API stage | `api`, `edge-waf` |
-| **Amazon CloudFront** | Web-app CDN and TLS termination | `web` |
+| **AWS WAF** (WAFv2) | Per-IP rate limiting on the UI load balancer and API stage | `api`, `web` |
+| **Elastic Load Balancing** (ALB) | Web-app TLS termination and routing | `web` |
+| **Amazon ECS** (Fargate) | Hosts the web-app (nginx), VKG and ontology-engine containers | `web`, `vkg`, `ontology` |
 | **AWS Step Functions** | Source-scan orchestration, namespace-deletion pipeline | `sources`, `namespace` |
 | **Amazon SQS** | Review queue, bulk-review worker continuations, async work | `api`, `sources`, `metric-service` |
 | **Amazon EventBridge** | Scan/ingest event routing and scheduled rules | `sources`, `ontology`, `vkg` |
@@ -1399,9 +1447,9 @@ Redshift-backed sources. If you deploy to a region missing one of the services
 you actually use, the failure appears at feature-use time rather than at deploy
 time.
 
-**`us-east-1` is always in the picture.** Even for a non-`us-east-1` deployment:
-the CloudFront-scope WAF WebACL and the UI ACM certificate must live in
-`us-east-1`, and ECR Public (build-time image pulls) is `us-east-1`-only. See
+**`us-east-1` still matters at build time.** ECR Public (base-image pulls) is
+`us-east-1`-only. Everything deployed, including the UI certificate and its
+REGIONAL WAF WebACL, lives in your deploy region. See
 [Cross-region and AZ constraints](#cross-region-and-az-constraints).
 
 **Availability Zones matter, not just regions.** AgentCore Runtime and the

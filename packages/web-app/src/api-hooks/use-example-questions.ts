@@ -20,11 +20,13 @@ interface QuestionsFile {
 }
 
 /**
- * Loads per-namespace sample prompts published to the UI origin at
- * `/questions/{namespaceId}.json` (same CloudFront origin that serves
- * `runtime-config.json`). The file is optional: if it is absent (404) or
- * malformed, this returns an empty list and the playground simply shows no
- * sample prompts.
+ * Loads per-namespace sample prompts from the UI origin at
+ * `/questions/{namespaceId}.json`, served by the same nginx container as
+ * `runtime-config.json`. Operators either commit the file to
+ * `packages/web-app/public/questions/` or drop it in the UI content bucket,
+ * which is synced in at container start. The file is optional: if it is absent
+ * (404) or malformed, this returns an empty list and the playground simply
+ * shows no sample prompts.
  */
 export function useExampleQuestions(namespaceId: string): ExampleQuestion[] {
   const [questions, setQuestions] = useState<ExampleQuestion[]>([]);

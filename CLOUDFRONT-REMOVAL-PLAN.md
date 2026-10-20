@@ -727,11 +727,22 @@ by review: `SslPolicy.RECOMMENDED_TLS13` does not exist (it is
 environment-agnostic stack (deviation 10), a lexicographic `Array.sort()` on
 port numbers, and an IAM matcher describing a statement that had been removed.
 
-**Still unverified:** the container. `docker build`, the entrypoint, the nginx
-config and the header matrix have never been executed, and CI never covers them
-— `pr.yml` sets `CDK_BUNDLING_STACKS: "[]"`, and Docker image assets are not
-built at synth regardless. The `apk add aws-cli` line and the `add_header`
-inheritance behaviour are the two places most likely to need a correction.
+**Container: verified locally.** `docker build` succeeds (so `apk add aws-cli`
+resolves on the nginx alpine base), the entrypoint renders `runtime-config.json`
+and the transport-headers snippet, and the served responses carry the expected
+headers with SPA fallback working.
+
+Note that **CI still never covers the container** — `pr.yml` sets
+`CDK_BUNDLING_STACKS: "[]"`, and Docker image assets are not built at synth
+regardless. Anyone editing `packages/web-app/nginx/` or the Dockerfile must
+re-run the local build and the header matrix by hand; a dropped `add_header`
+produces a container that serves pages perfectly while silently losing its
+security headers, and nothing in the pipeline will catch it.
+
+**Still unverified:** everything that needs a live deployment — target-group
+health, the WAF association being accepted, Cognito accepting the callback URLs,
+ECR pull from private subnets, real TLS, and the `questions/` sync under the
+task role.
 10. **The UI ALB has no S3 access logging.** The plan called for an
    `AccessLogsBucket` wired via `logAccessLogs()`, but that resolves the
    regional ELB log-delivery account at synth time and **every stack in this app

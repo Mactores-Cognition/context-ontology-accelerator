@@ -4,7 +4,11 @@
 # nginx serving the prebuilt Vite SPA (`dist/` must exist — see .dockerignore).
 # Alpine from public ECR, not Docker Hub. Renovate keeps this digest current
 # (dockerfile manager + pinDigests, held to the 1.29 line).
-FROM --platform=linux/arm64 public.ecr.aws/docker/library/nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+#
+# No hardcoded --platform: CDK passes `--platform linux/arm64` via
+# ContainerImage.fromAsset, so a plain `docker build` can still use the host
+# architecture for local smoke-testing without qemu. Same as packages/vkg.
+FROM public.ecr.aws/docker/library/nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
 
 # aws-cli backs the optional operator questions/ sync in the entrypoint.
 RUN apk add --no-cache aws-cli

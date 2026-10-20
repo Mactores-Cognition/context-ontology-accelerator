@@ -1,0 +1,10 @@
+# Build context filter. Only the built SPA and the serving config are needed;
+# excluding node_modules/src also keeps the CDK asset hash stable across installs.
+# Dockerfile must stay listed: CDK stages this directory using these rules and
+# then runs `docker build` in the staged copy, so an excluded Dockerfile breaks
+# the asset build (unlike a plain `docker build`, which always sends it).
+*
+!Dockerfile
+!dist/
+!nginx/
+!docker-entrypoint.sh

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import * as fs from "fs";
+import * as path from "path";
 import * as cdk from "aws-cdk-lib";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
@@ -28,7 +29,6 @@ import {
 // Foundation stacks
 import {
   AuthnzStack,
-  EdgeWafStack,
   GuardrailStack,
   IdpAuthenticationStack,
   NetworkStack,
@@ -148,73 +148,97 @@ async function deploy(): Promise<void> {
     );
   }
   const authProps = IdpAuthenticationStack.fromSsmConfig(config);
-  // Custom domains are all-or-nothing: provide every field or none.
-  const cdFields = {
-    uiDomainName: app.node.tryGetContext("ui_domain") as string | undefined,
-    uiCertificateArn: app.node.tryGetContext("ui_cert_arn") as
-      | string
-      | undefined,
-    apiDomainName: app.node.tryGetContext("api_domain") as string | undefined,
-    apiCertificateArn: app.node.tryGetContext("api_cert_arn") as
-      | string
-      | undefined,
-    hostedZoneId: app.node.tryGetContext("hosted_zone_id") as
-      | string
-      | undefined,
-  };
-  const cdValues = Object.values(cdFields);
-  if (cdValues.some(Boolean) && !cdValues.every(Boolean)) {
+
+  // Custom domains come in two independent pairs. Supplying the UI pair is what
+  // upgrades the ALB from HTTP to HTTPS; the API is usable on its default
+  // execute-api endpoint either way, so requiring both together would tax a
+  // UI-only TLS setup for nothing. hosted_zone_id is independent again — DNS
+  // may be managed outside this account.
+  const uiDomainName = app.node.tryGetContext("ui_domain") as
+    | string
+    | undefined;
+  const uiCertificateArn = app.node.tryGetContext("ui_cert_arn") as
+    | string
+    | undefined;
+  const apiDomainName = app.node.tryGetContext("api_domain") as
+    | string
+    | undefined;
+  const apiCertificateArn = app.node.tryGetContext("api_cert_arn") as
+    | string
+    | undefined;
+  const hostedZoneId = app.node.tryGetContext("hosted_zone_id") as
+    | string
+    | undefined;
+
+  if (!uiDomainName !== !uiCertificateArn) {
     throw new Error(
-      "Custom domain requires ALL of: ui_domain, ui_cert_arn, api_domain, " +
-        "api_cert_arn, hosted_zone_id — or none of them.",
+      "Custom domain: ui_domain and ui_cert_arn must be provided together (or neither).",
     );
   }
-  const customDomain: CustomDomainConfig | undefined = cdValues.every(Boolean)
-    ? (cdFields as CustomDomainConfig)
-    : undefined;
-
-  // Certificate region checks (fail fast at synth).
-  const certRegion = (arn: string): string | undefined => arn.split(":")[3];
-  if (customDomain) {
-    if (certRegion(customDomain.uiCertificateArn) !== "us-east-1") {
-      throw new Error(
-        `Custom domain: uiCertificateArn must be an ACM certificate in us-east-1 (CloudFront requirement); got region ${certRegion(customDomain.uiCertificateArn)}.`,
-      );
-    }
-    if (certRegion(customDomain.apiCertificateArn) !== deployRegion) {
-      throw new Error(
-        `Custom domain: apiCertificateArn must be in the API region ${deployRegion}; got ${certRegion(customDomain.apiCertificateArn)}.`,
-      );
-    }
+  if (!apiDomainName !== !apiCertificateArn) {
+    throw new Error(
+      "Custom domain: api_domain and api_cert_arn must be provided together (or neither).",
+    );
   }
 
-  const allowedOrigin = customDomain
-    ? `https://${customDomain.uiDomainName}`
+  const customDomain: CustomDomainConfig | undefined =
+    uiDomainName || apiDomainName || hostedZoneId
+      ? {
+          ...(uiDomainName &&
+            uiCertificateArn && { uiDomainName, uiCertificateArn }),
+          ...(apiDomainName &&
+            apiCertificateArn && { apiDomainName, apiCertificateArn }),
+          ...(hostedZoneId && { hostedZoneId }),
+        }
+      : undefined;
+
+  // Both certificates must be in the deploy region: the UI cert terminates TLS
+  // on the ALB and the API cert on API Gateway, neither of which is global.
+  const certRegion = (arn: string): string | undefined => arn.split(":")[3];
+  if (uiCertificateArn && certRegion(uiCertificateArn) !== deployRegion) {
+    throw new Error(
+      `Custom domain: ui_cert_arn must be an ACM certificate in the deploy region ${deployRegion}; got ${certRegion(uiCertificateArn)}.`,
+    );
+  }
+  if (apiCertificateArn && certRegion(apiCertificateArn) !== deployRegion) {
+    throw new Error(
+      `Custom domain: api_cert_arn must be in the API region ${deployRegion}; got ${certRegion(apiCertificateArn)}.`,
+    );
+  }
+
+  // Derived from uiDomainName, not `customDomain` truthiness: an API-only
+  // config would otherwise yield "https://undefined" and silently break S3 CORS
+  // and every service stack's CORS.
+  const allowedOrigin = uiDomainName
+    ? `https://${uiDomainName}`
     : envName === "prod"
       ? (() => {
           throw new Error(
-            "Production deployments require a UI custom domain for CORS. Set the custom-domain context (ui_domain, ...) or SSM config.",
+            "Production deployments require a UI custom domain for CORS. Set ui_domain + ui_cert_arn (or SSM config).",
           );
         })()
       : "*";
 
   // ── WAF WebACL inputs ──────────────────────────────────────────────
   // Optionally bring your own WebACL ARN per surface. API Gateway needs a
-  // REGIONAL-scope ARN (this region); CloudFront needs a CLOUDFRONT-scope ARN
-  // (us-east-1). When a surface's ARN is omitted, a WebACL with
+  // REGIONAL-scope ARN in this region. Both surfaces (API Gateway and the UI
+  // ALB) are REGIONAL. When a surface's ARN is omitted, a WebACL with
   // AWSManagedRulesCommonRuleSet is auto-created for it.
   const apiWebAclId = app.node.tryGetContext("api_web_acl_id") as
     | string
     | undefined;
-  const cloudfrontWebAclId = app.node.tryGetContext("cloudfront_web_acl_id") as
+  const uiWebAclId = app.node.tryGetContext("ui_web_acl_id") as
     | string
     | undefined;
-  // CloudFront auto-create: a CLOUDFRONT WebACL must live in us-east-1, so it
-  // is provisioned by a dedicated EdgeWafStack and its ARN is read by the
-  // WebStack from SSM. Skipped without credentials (CI synth) since the
-  // us-east-1 stack needs a concrete account.
-  const deployAccount = process.env.CDK_DEFAULT_ACCOUNT;
-  const cfWebAclParamName = `/${prefix}/edge/cloudfront-web-acl-arn`;
+  // Removed with CloudFront. The old key's value is a CLOUDFRONT-scope ARN,
+  // which a CfnWebACLAssociation on an ALB rejects at deploy time with
+  // WAFInvalidParameterException — so fail here instead.
+  if (app.node.tryGetContext("cloudfront_web_acl_id")) {
+    throw new Error(
+      "The cloudfront_web_acl_id context key was removed with CloudFront. Use " +
+        "ui_web_acl_id with a REGIONAL-scope WebACL ARN in the deploy region.",
+    );
+  }
 
   // OE monitoring alarm action seam. Undefined in round one: alarms are
   // action-ready but route nowhere until a strategy (SNS/chatbot) is wired
@@ -443,16 +467,25 @@ async function deploy(): Promise<void> {
   dataLayer.addDependency(serve); // needs /{prefix}/serve/runtime-arn SSM param
   api.addDependency(dataLayer);
 
-  // CloudFront WebACL: use a caller-provided ARN, else auto-create in
-  // us-east-1 via EdgeWafStack and have WebStack read the ARN from SSM.
-  let edgeWaf: EdgeWafStack | undefined;
-  let cfAutoWebAclParam: { name: string; region: string } | undefined;
-  if (!cloudfrontWebAclId && deployAccount) {
-    edgeWaf = new EdgeWafStack(app, `${stackPrefix}-edge-waf`, {
-      env: { account: deployAccount, region: "us-east-1" },
-      webAclArnParameterName: cfWebAclParamName,
-    });
-    cfAutoWebAclParam = { name: cfWebAclParamName, region: "us-east-1" };
+  // The SPA is baked into the UI container image, so dist/ must exist before
+  // the image asset is built. A missing dist otherwise fails at asset-publish
+  // time mid-deploy with an opaque `COPY failed`. index.html rather than the
+  // directory: an aborted build leaves an empty dist/ that would ship blank.
+  // Skipped on the prebuilt-image path, which does not build the asset.
+  const usingPrebuiltWebImage = Boolean(
+    app.node.tryGetContext("web_app_image_uri") &&
+      app.node.tryGetContext("ecr_repository_arn") &&
+      app.node.tryGetContext("ecr_repository_name"),
+  );
+  if (
+    !usingPrebuiltWebImage &&
+    !fs.existsSync(path.join(webAppDist, "index.html"))
+  ) {
+    throw new Error(
+      `${webAppDist}/index.html is missing. The SPA is baked into the UI container ` +
+        "image, so the Vite build must run before synth: `pnpm nx run coa-web-app:build` " +
+        "(or `make build`). `make deploy-dev` and `nx run infra:synth` do this for you.",
+    );
   }
 
   const web = new WebStack(app, `${stackPrefix}-web`, {
@@ -462,14 +495,11 @@ async function deploy(): Promise<void> {
     // construct properties, so this stack has no direct reference into the
     // auth stack's resource tree (see PR for the export-lock this avoids).
     isCognitoMode: config.idpType !== IdpType.OIDC,
+    vpc: network.vpc,
     apiEndpoint: api.api.url,
     apiRestApiId: api.api.restApiId,
     apiStageName: api.api.deploymentStage.stageName,
-    ...(cloudfrontWebAclId
-      ? { webAclId: cloudfrontWebAclId }
-      : cfAutoWebAclParam
-        ? { autoWebAclParam: cfAutoWebAclParam }
-        : {}),
+    ...(uiWebAclId && { webAclArn: uiWebAclId }),
     serveRuntimeArn: serve.queryEndpoint,
     ...(app.node.tryGetContext("content_security_policy") && {
       contentSecurityPolicy: String(
@@ -477,12 +507,10 @@ async function deploy(): Promise<void> {
       ),
     }),
     ...(customDomain && { customDomain }),
-    ...(fs.existsSync(webAppDist) && { websiteContentPath: webAppDist }),
   });
   web.addDependency(auth);
   web.addDependency(api);
   web.addDependency(serve);
-  if (edgeWaf) web.addDependency(edgeWaf);
 
   // VKG stack created above (vkg variable used by serve stack for endpoint)
 

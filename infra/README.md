@@ -266,8 +266,8 @@ Stacks are deployed in dependency order (managed by `addDependency()` in `bin/ap
 | `coa-dev-namespace`  | DataZone domain, project, asset types, **per-namespace Athena workgroups** (created/deleted with namespace lifecycle)                                                              | Domain ID                                                   | network, authnz                    | 5 min        |
 | `coa-dev-api`        | API Gateway, Lambda authorizer, **cache-invalidation Lambda** (DynamoDB Streams → authorizer role-cache version bump, DLQ `coa-dev-cache-invalidation-dlq`), Lambda handlers                | API URL, REST API ID                                        | network, auth                      | 3 min        |
 | `coa-dev-structured` | Structured ingestion Lambda, DynamoDB tables, **per-datasource Glue Connections + Athena federated catalogs** (created during scan)                                                | Table ARNs                                                  | network, namespace                 | 3 min        |
-| `coa-dev-serve`      | AgentCore Runtime, private ALB, DNS resolver Lambda, target group                                                                                                                  | `AlbDnsName`, `AgentRuntimeArn`, `AgentRuntimeEndpointName` | network, auth, storage, structured | 10 min       |
-| `coa-dev-web`        | CloudFront distribution, S3 bucket, VPC Origin (`/ws`)                                                                                                                             | Distribution URL                                            | auth, api, serve                   | 5 min        |
+| `coa-dev-serve`      | AgentCore Runtime, DNS resolver Lambda                                                                                                                                             | `AgentRuntimeArn`, `AgentRuntimeEndpointName`               | network, auth, storage, structured | 10 min       |
+| `coa-dev-web`        | ALB (internet-facing), ECS Fargate nginx service serving the SPA, REGIONAL WAF WebACL, UI content bucket                                                                                                                             | `WebsiteURL`, `LoadBalancerDnsName`                         | network, auth, api, serve          | 5 min        |
 | `coa-dev-vkg`        | VKG ECS Fargate service                                                                                                                                                            | —                                                           | network                            | 5 min        |
 
 ### Serve Stack (`coa-dev-serve`)
@@ -282,23 +282,17 @@ Deploys the Context Manager on Bedrock AgentCore Runtime with WebSocket connecti
 - **IP Target Group** — Registers VPC endpoint IPs as ALB targets (HTTPS:443)
 - **Security Groups** — ALB egress to VPC CIDR on 443; AgentCore egress to VPC + NAT
 
-**WebSocket Connectivity:**
+**Serve runtime access:**
 
-The ALB exposes a `/ws` path that rewrites to the full AgentCore WebSocket path (`/runtimes/<encoded-arn>/ws?qualifier=<endpoint>`). Browser clients access it through CloudFront VPC Origin.
+The Playground streams over SSE by `fetch` directly against
+`bedrock-agentcore.<region>.amazonaws.com` (allowlisted in the SPA's
+Content-Security-Policy), so no reverse proxy sits in front of it. The UI ALB
+serves static assets only.
 
-| Access Method               | URL                                                                | Use Case                                                               |
-| --------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| Via CloudFront (production) | `wss://<CloudFrontDomain>/ws`                                      | Browser clients (Playground UI) in public deployment mode              |
-| Via ALB (VPC-internal)      | `ws://<AlbDnsName>/ws`                                             | Services within the VPC (e.g., ECS Fargate in private deployment mode) |
-| Direct VPC endpoint         | `wss://bedrock-agentcore.<region>.amazonaws.com/runtimes/<arn>/ws` | Backend services (Lambda, ECS) with VPC access + JWT token             |
-
-> **Note:** The ALB is private (not internet-facing). Browser clients access it through CloudFront VPC Origin in public mode, or directly in private deployment mode (ECS Fargate + ALB).
-
-Obtain `AlbDnsName` from CDK outputs:
-
-```bash
-npx cdk deploy coa-dev-serve 2>&1 | grep AlbDnsName
-```
+| Caller                | Endpoint                                                           |
+| --------------------- | ------------------------------------------------------------------ |
+| Browser (Playground)  | `https://bedrock-agentcore.<region>.amazonaws.com/runtimes/<arn>/invocations` |
+| Backend (Lambda, ECS) | Same, via the VPC endpoint, with a JWT                             |
 
 **Authentication (JWT):**
 
@@ -332,8 +326,7 @@ Clients pass the **ID Token** as `Authorization: Bearer <token>`.
 | 403 "Authorization method mismatch" | Using SigV4 instead of JWT      | Use `Authorization: Bearer <id_token>` header                |
 | 403 "Token audience mismatch"       | Wrong client ID in `aud` claim  | Ensure the ID token's `aud` matches the configured `clientId`|
 | 403 "Claim 'client_id' mismatch"    | Wrong App Client ID in config              | Verify `clientId` matches the Cognito App Client used for authentication        |
-| ALB targets unhealthy               | VPC endpoint not reachable                 | Check security group egress, verify VPC endpoint exists                         |
-| WebSocket connection refused        | ALB security group missing ingress         | Add ingress rule from CloudFront prefix list or VPC CIDR                        |
+| UI ALB targets unhealthy            | Service SG or health check                 | Verify the service SG allows 8080 from the ALB SG and `/health` returns 200     |
 
 ## Operational Monitoring
 
@@ -342,7 +335,7 @@ Each service stack provisions CloudWatch dashboards and alarms via the shared
 [`cdk-monitoring-constructs`](https://github.com/cdklabs/cdk-monitoring-constructs).
 A stack instantiates it once and registers the resources it owns
 (`monitorLambda`, `monitorApi`, `monitorFargateService`, `monitorQueueWithDlq`,
-`monitorStateMachine`, `monitorTable`, `monitorClusterCpuMem`).
+`monitorStateMachine`, `monitorTable`, `monitorClusterCpuMem`, `monitorAlb`).
 
 ### Dashboards
 

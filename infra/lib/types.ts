@@ -65,27 +65,26 @@ export interface IdpAuthenticationStackProps extends cdk.StackProps {
 /**
  * Custom-domain configuration for the public web surface.
  *
- * This is provided as a whole or not at all (the consuming prop is optional).
- * When provided, **all** fields are required — configure custom domains for the
- * UI and API together, or omit `CustomDomainConfig` entirely to use the default
- * CloudFront `*.cloudfront.net` domain and the API's default `execute-api`
- * endpoint.
+ * Three independent parts, each optional: the UI pair, the API pair, and the
+ * hosted zone. Within a pair both fields are required or neither (validated in
+ * `bin/app.ts`). The UI pair is what gives the ALB an HTTPS listener — without
+ * it the UI is served over plain HTTP, which is dev-only. Omitting the API pair
+ * leaves the API on its default `execute-api` endpoint.
  *
- * Validated at synth:
- * - `uiCertificateArn` MUST be in **us-east-1** (CloudFront requirement).
- * - `apiCertificateArn` MUST be in the **API's deployment region**.
+ * Both certificates MUST be in the **deploy region**: the UI cert terminates
+ * TLS on the ALB and the API cert on API Gateway, neither of which is global.
  */
 export interface CustomDomainConfig {
-  /** Web UI (CloudFront) custom domain, e.g. "coa.amazon.com". */
-  readonly uiDomainName: string;
-  /** ARN of the ACM certificate for {@link uiDomainName} (us-east-1). */
-  readonly uiCertificateArn: string;
+  /** Web UI custom domain, e.g. "coa.amazon.com". */
+  readonly uiDomainName?: string;
+  /** ARN of the ACM certificate for {@link uiDomainName} (deploy region). */
+  readonly uiCertificateArn?: string;
   /** REST API (API Gateway) custom domain, e.g. "api.coa.amazon.com". */
-  readonly apiDomainName: string;
-  /** ARN of the ACM certificate for {@link apiDomainName} (API region). */
-  readonly apiCertificateArn: string;
+  readonly apiDomainName?: string;
+  /** ARN of the ACM certificate for {@link apiDomainName} (deploy region). */
+  readonly apiCertificateArn?: string;
   /** Route53 hosted zone id for the domains; alias records are created here. */
-  readonly hostedZoneId: string;
+  readonly hostedZoneId?: string;
 }
 
 // ── SSM Config (JSON-serializable) ─────────────────────────────────

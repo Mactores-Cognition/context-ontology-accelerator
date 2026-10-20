@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import * as cdk from "aws-cdk-lib";
-import { buildContentSecurityPolicy } from "../../lib/constructs/public-ui-construct";
+import { buildContentSecurityPolicy } from "../../lib/constructs/content-security-policy";
 import type { RuntimeConfig } from "@coa/shared";
 
 const baseConfig: RuntimeConfig = {
@@ -271,5 +271,34 @@ describe("buildContentSecurityPolicy — Cognito hosted-UI origin (issue #130)",
   it("still lets a caller override win over the derived hosted-UI origin", () => {
     const custom = "default-src 'none'";
     expect(buildContentSecurityPolicy(baseConfig, custom, PREFIX)).toBe(custom);
+  });
+});
+
+describe("buildContentSecurityPolicy (insecure transport)", () => {
+  it("emits upgrade-insecure-requests by default", () => {
+    expect(buildContentSecurityPolicy(baseConfig)).toContain(
+      "upgrade-insecure-requests",
+    );
+  });
+
+  it("omits upgrade-insecure-requests when serving over plain HTTP", () => {
+    // On an http:// document the directive rewrites every asset request to
+    // https:// against a listener with no TLS, so the page loads nothing.
+    expect(
+      buildContentSecurityPolicy(baseConfig, undefined, undefined, true),
+    ).not.toContain("upgrade-insecure-requests");
+  });
+
+  it("changes nothing else on the insecure path", () => {
+    const secure = buildContentSecurityPolicy(baseConfig, undefined, PREFIX);
+    const insecure = buildContentSecurityPolicy(
+      baseConfig,
+      undefined,
+      PREFIX,
+      true,
+    );
+    expect(insecure).toBe(
+      secure.replace("; upgrade-insecure-requests", ""),
+    );
   });
 });

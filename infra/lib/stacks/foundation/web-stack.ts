@@ -8,7 +8,8 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
-import { PublicUIConstruct } from "../../constructs/public-ui-construct";
+import * as ec2 from "aws-cdk-lib/aws-ec2";
+import { WebAlbConstruct } from "../../constructs/web-alb-construct";
 import { RuntimeConfig } from "@coa/shared";
 import { SCLStack } from "../../constructs/scl-stack";
 import { resolveContext } from "../../context";
@@ -80,32 +81,22 @@ export interface WebStackProps extends cdk.StackProps {
   readonly isCognitoMode: boolean;
   /** Backend API endpoint URL. */
   readonly apiEndpoint?: string;
-  /** API Gateway REST API ID (used to update CORS origin after CloudFront creation). */
+  /** API Gateway REST API ID (used to update CORS once the UI origin is known). */
   readonly apiRestApiId?: string;
   /** API Gateway stage name (used to trigger redeployment after CORS update). */
   readonly apiStageName?: string;
-  /** Path to built web-app assets directory. */
-  readonly websiteContentPath?: string;
+  /** VPC hosting the UI load balancer and nginx tasks. */
+  readonly vpc: ec2.IVpc;
   /** Custom domain configuration for the UI and/or API. */
   readonly customDomain?: CustomDomainConfig;
-  /** When true, deploy frontend via ECS Fargate + ALB instead of CloudFront + S3. */
-  readonly enablePrivateEndpoints?: boolean;
-  /** Optional WAF WebACL ARN (CLOUDFRONT scope). Takes precedence over {@link autoWebAclParam}. */
-  readonly webAclId?: string;
-  /**
-   * Cross-region SSM parameter holding an auto-created CLOUDFRONT WebACL ARN
-   * (published by {@link EdgeWafStack} in us-east-1). Read via a custom
-   * resource when {@link webAclId} is not provided directly.
-   */
-  readonly autoWebAclParam?: { readonly name: string; readonly region: string };
+  /** REGIONAL WebACL ARN for the UI ALB. One is created when omitted. */
+  readonly webAclArn?: string;
   /** AgentCore Runtime ARN for SSE streaming queries. */
   readonly serveRuntimeArn?: string;
   /**
    * Fully custom Content-Security-Policy header value, replacing the derived
    * one. Wired from the `content_security_policy` CDK context key in
-   * `bin/app.ts` — the escape hatch existed on {@link PublicUIConstructProps}
-   * but reached nothing, so extending the policy meant patching CDK source
-   * (issue #130).
+   * `bin/app.ts` (issue #130).
    */
   readonly contentSecurityPolicy?: string;
 }
@@ -113,24 +104,20 @@ export interface WebStackProps extends cdk.StackProps {
 /**
  * Web application hosting stack for the Context Ontology Accelerator.
  *
- * Supports two deployment modes:
- * - **Public (default)** — CloudFront + S3 via {@link PublicUIConstruct}.
- *   Static assets are served from S3 through a CloudFront distribution with OAC,
- *   security headers, and SPA routing (404/403 → `index.html`).
- * - **Private** — ECS Fargate + ALB (not yet implemented; throws if `enablePrivateEndpoints` is set).
+ * Serves the React SPA from an nginx container on ECS Fargate behind an
+ * internet-facing ALB. TLS terminates on the ALB with an operator-supplied ACM
+ * certificate; without one the ALB serves plain HTTP, which is dev-only (see
+ * {@link WebAlbConstruct}).
  *
- * On first deploy without a custom domain, the CloudFront URL is auto-generated.
- * This stack automatically patches:
- * 1. **Cognito callback URLs** — updates the user pool client with the CloudFront origin.
- * 2. **API Gateway CORS** — updates gateway response headers with the CloudFront origin
- *    and triggers an API redeployment.
+ * When no UI custom domain is configured the origin is only known at deploy
+ * time, so this stack patches:
+ * 1. **Cognito callback URLs** — but only to an https origin; Cognito rejects
+ *    non-localhost http callbacks, so the HTTP path registers localhost only.
+ * 2. **API Gateway CORS** — gateway response headers plus an API redeployment.
  *
- * When `customDomain` is provided, both patches are skipped since the origin is
- * known upfront and passed directly to the auth and API stacks.
- *
- * Runtime configuration (`runtime-config.json`) is injected into S3 at deploy time
- * with the OIDC authority, client ID, and API endpoint so the React app can
- * discover backends without a rebuild.
+ * `runtime-config.json` is handed to the container as RUNTIME_CONFIG_JSON and
+ * written to the webroot at start-up, so the SPA discovers its backends without
+ * a rebuild.
  */
 export class WebStack extends SCLStack {
   constructor(scope: Construct, id: string, props: WebStackProps) {
@@ -189,83 +176,35 @@ export class WebStack extends SCLStack {
       version: readRepoVersion(),
     });
 
-    if (props.enablePrivateEndpoints) {
-      throw new Error(
-        "Private endpoints (ECS frontend) not yet implemented. Set enablePrivateEndpoints to false.",
-      );
-    }
-
-    // ── Resolve the CloudFront WebACL ARN ──────────────────────────
-    // Prefer a caller-provided ARN. Otherwise, on the auto-create path, read
-    // the ARN published by the us-east-1 EdgeWafStack from its SSM parameter.
-    // The read is cross-region (CLOUDFRONT WebACLs live in us-east-1) so it
-    // goes through a custom resource with an explicit region rather than a
-    // CFN dynamic reference (which cannot cross regions).
-    let resolvedWebAclId = props.webAclId;
-    if (!resolvedWebAclId && props.autoWebAclParam) {
-      const { name, region } = props.autoWebAclParam;
-      const webAclReader = new cr.AwsCustomResource(
-        this,
-        "ReadCloudFrontWebAcl",
-        {
-          installLatestAwsSdk: false,
-          onUpdate: {
-            service: "SSM",
-            action: "getParameter",
-            parameters: { Name: name },
-            region,
-            physicalResourceId: cr.PhysicalResourceId.of(`cf-web-acl-${name}`),
-          },
-          policy: cr.AwsCustomResourcePolicy.fromStatements([
-            new iam.PolicyStatement({
-              actions: ["ssm:GetParameter"],
-              resources: [
-                `arn:aws:ssm:${region}:${this.account}:parameter${name}`,
-              ],
-            }),
-          ]),
-        },
-      );
-      resolvedWebAclId = webAclReader.getResponseField("Parameter.Value");
-    }
-
-    const publicUI = new PublicUIConstruct(this, "PublicUI", {
-      websiteContentPath: props.websiteContentPath,
+    const web = new WebAlbConstruct(this, "WebAlb", {
+      vpc: props.vpc,
       runtimeConfig,
-      webAclId: resolvedWebAclId,
+      ...(uiDomainName && { uiDomainName }),
+      ...(uiCertificateArn && { uiCertificateArn }),
       ...(cognitoDomainPrefix && { cognitoDomainPrefix }),
+      ...(props.webAclArn && { webAclArn: props.webAclArn }),
       ...(props.contentSecurityPolicy && {
         contentSecurityPolicy: props.contentSecurityPolicy,
       }),
-      ...(uiDomainName &&
-        uiCertificateArn && { uiDomainName, uiCertificateArn }),
     });
 
-    // The origin the browser is actually served from — the custom UI domain
-    // when configured, otherwise the generated CloudFront domain (only known
-    // at deploy time). Cognito callbacks are patched to match.
-    const siteUrl = uiDomainName
-      ? `https://${uiDomainName}`
-      : `https://${publicUI.distribution.distributionDomainName}`;
+    const siteUrl = web.siteUrl;
 
-    // Optional: create Route53 alias records (A + AAAA) → CloudFront when a
-    // hosted zone is provided. Uses L1 CfnRecordSet so only the zone id is
-    // needed (no zone-name lookup). Z2FDTNDATAQYW2 is CloudFront's fixed alias
-    // hosted-zone id. When omitted, DNS is managed externally.
+    // Optional Route53 alias → the ALB. L1 CfnRecordSet so only the zone id is
+    // needed. A only: the ALB is IPv4, so an AAAA record would resolve empty.
+    // When omitted, DNS is managed externally.
     const hostedZoneId = props.customDomain?.hostedZoneId;
     if (hostedZoneId && uiDomainName) {
-      for (const recordType of ["A", "AAAA"] as const) {
-        new route53.CfnRecordSet(this, `UiAlias${recordType}`, {
-          hostedZoneId,
-          name: `${uiDomainName}.`,
-          type: recordType,
-          aliasTarget: {
-            dnsName: publicUI.distribution.distributionDomainName,
-            hostedZoneId: "Z2FDTNDATAQYW2",
-            evaluateTargetHealth: false,
-          },
-        });
-      }
+      new route53.CfnRecordSet(this, "UiAliasA", {
+        hostedZoneId,
+        name: `${uiDomainName}.`,
+        type: "A",
+        aliasTarget: {
+          dnsName: web.loadBalancer.loadBalancerDnsName,
+          hostedZoneId: web.loadBalancer.loadBalancerCanonicalHostedZoneId,
+          evaluateTargetHealth: false,
+        },
+      });
     }
 
     // ── Patch Cognito callback URLs ────────────────────────────────
@@ -276,7 +215,25 @@ export class WebStack extends SCLStack {
     // Mapping: authFlows.userSrp → ALLOW_USER_SRP_AUTH,
     //          (implicit)        → ALLOW_REFRESH_TOKEN_AUTH,
     //          OAuthScope.OPENID → "openid", etc.
-    if (props.isCognitoMode) {
+    //
+    // Cognito rejects non-localhost http callback URLs, so on the plain-HTTP
+    // path the ALB origin cannot be registered at all: in dev we register only
+    // localhost (keeping `pnpm dev` sign-in working), and otherwise we skip the
+    // patch entirely rather than fail the deploy or send an empty CallbackURLs,
+    // which Cognito also rejects. prod never reaches here — bin/app.ts requires
+    // a UI custom domain there.
+    const isDev = this.envName === "dev";
+    const callbackUrls = [
+      ...(web.insecureTransport ? [] : [`${siteUrl}/authenticate/`]),
+      ...(isDev ? ["http://localhost:5173/authenticate/"] : []),
+    ];
+    const logoutUrls = web.insecureTransport
+      ? isDev
+        ? ["http://localhost:5173/"]
+        : []
+      : [`${siteUrl}/`];
+
+    if (props.isCognitoMode && callbackUrls.length > 0) {
       new cr.AwsCustomResource(this, "UpdateCognitoCallbacks", {
         installLatestAwsSdk: false,
         onUpdate: {
@@ -285,13 +242,8 @@ export class WebStack extends SCLStack {
           parameters: {
             UserPoolId: userPoolId,
             ClientId: clientId,
-            CallbackURLs: [
-              `${siteUrl}/authenticate/`,
-              ...(this.envName === "dev"
-                ? ["http://localhost:5173/authenticate/"]
-                : []),
-            ],
-            LogoutURLs: [`${siteUrl}/`],
+            CallbackURLs: callbackUrls,
+            LogoutURLs: logoutUrls,
             ExplicitAuthFlows: [
               "ALLOW_USER_SRP_AUTH",
               "ALLOW_REFRESH_TOKEN_AUTH",
@@ -299,7 +251,7 @@ export class WebStack extends SCLStack {
               // updateUserPoolClient is a full replacement, so omitting this
               // in dev silently strips ALLOW_USER_PASSWORD_AUTH (added there
               // for integ-test/CLI sign-in) after this custom resource runs.
-              ...(this.envName === "dev" ? ["ALLOW_USER_PASSWORD_AUTH"] : []),
+              ...(isDev ? ["ALLOW_USER_PASSWORD_AUTH"] : []),
             ],
             AllowedOAuthFlows: ["code"],
             AllowedOAuthScopes: ["email", "openid", "profile"],

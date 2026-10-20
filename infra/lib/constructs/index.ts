@@ -14,10 +14,13 @@ export type {
 } from "./jdbc-connectivity";
 export { SCLConstruct } from "./scl-construct";
 export { SCLStack } from "./scl-stack";
-export { PublicUIConstruct } from "./public-ui-construct";
+export { buildContentSecurityPolicy } from "./content-security-policy";
+export { WebAlbConstruct } from "./web-alb-construct";
+export type { WebAlbConstructProps } from "./web-alb-construct";
+export { WafWebAcl } from "./waf-web-acl";
+export type { WafWebAclProps } from "./waf-web-acl";
 export { UserPoolUser } from "./user-pool-user";
 export type { UserPoolUserProps } from "./user-pool-user";
-export type { PublicUIConstructProps } from "./public-ui-construct";
 export type { RuntimeConfig } from "@coa/shared";
 export { SclMonitoring } from "./monitoring";
 export type { SclMonitoringProps } from "./monitoring";

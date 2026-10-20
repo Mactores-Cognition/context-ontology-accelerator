@@ -223,27 +223,17 @@ else
   ok "Lambda reserved concurrency disabled (lambda_reserved_concurrency=0) — skipping headroom check"
 fi
 
-# ── 8. CDK bootstrap in every region the deploy touches ───────────────────
-# The *-edge-waf stack ALWAYS deploys to us-east-1 (CloudFront-scope WAF WebACLs
-# and CloudFront ACM certs exist only there), so a non-us-east-1 deploy needs
-# BOTH regions bootstrapped. Without this the deploy runs for a long while and
-# then fails on that one stack with a bootstrap error — the docs showed a single
-# `cdk bootstrap <REGION>` and never mentioned the second one.
+# ── 8. CDK bootstrap in the deploy region ─────────────────────────────────
+# Single region since CloudFront was removed: the UI ALB terminates TLS with a
+# deploy-region ACM cert and its WAF WebACL is REGIONAL, so the us-east-1
+# *-edge-waf stack no longer exists.
 if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
-  _bootstrap_regions="$REGION"
-  [ "$REGION" != "us-east-1" ] && _bootstrap_regions="$REGION us-east-1"
-  for _bsr in $_bootstrap_regions; do
-    if aws cloudformation describe-stacks --stack-name CDKToolkit --region "$_bsr" \
-        >/dev/null 2>&1; then
-      ok "CDK bootstrapped in $_bsr"
-    else
-      err "CDK is not bootstrapped in $_bsr."
-      if [ "$_bsr" = "us-east-1" ] && [ "$REGION" != "us-east-1" ]; then
-        err "us-east-1 is always required — the *-edge-waf stack deploys there regardless of your deploy region."
-      fi
-      err "Run: npx cdk bootstrap aws://\$(aws sts get-caller-identity --query Account --output text)/$_bsr"
-    fi
-  done
+  if aws cloudformation describe-stacks --stack-name CDKToolkit --region "$REGION"       >/dev/null 2>&1; then
+    ok "CDK bootstrapped in $REGION"
+  else
+    err "CDK is not bootstrapped in $REGION."
+    err "Run: npx cdk bootstrap aws://\$(aws sts get-caller-identity --query Account --output text)/$REGION"
+  fi
 else
   warn "AWS credentials not available — skipping CDK bootstrap check"
 fi

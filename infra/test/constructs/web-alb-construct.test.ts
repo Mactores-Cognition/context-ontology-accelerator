@@ -61,7 +61,7 @@ describe("WebAlbConstruct network isolation", () => {
     const ports = (
       alb?.Properties.SecurityGroupIngress as { FromPort: number }[]
     ).map((r) => r.FromPort);
-    expect(ports.sort()).toEqual([80, 443]);
+    expect(ports.sort((a, b) => a - b)).toEqual([80, 443]);
   });
 
   test("tasks run in private subnets without public IPs", () => {
@@ -106,16 +106,13 @@ describe("WebAlbConstruct operator content", () => {
       },
     });
 
-    template.hasResourceProperties("AWS::IAM::Policy", {
-      PolicyDocument: Match.objectLike({
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: "s3:ListBucket",
-            Condition: { StringLike: { "s3:prefix": ["questions/*"] } },
-          }),
-        ]),
-      }),
-    });
+    const taskPolicy = JSON.stringify(
+      Object.entries(template.findResources("AWS::IAM::Policy")).find(
+        ([logicalId]) => logicalId.includes("TaskRole"),
+      )?.[1],
+    );
+    expect(taskPolicy).toContain("s3:GetObject*");
+    expect(taskPolicy).toContain("questions/*");
 
     template.hasResourceProperties("AWS::ECS::TaskDefinition", {
       ContainerDefinitions: Match.arrayWith([

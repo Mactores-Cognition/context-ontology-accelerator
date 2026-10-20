@@ -90,6 +90,13 @@ describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
       new WebStack(app, "TestWebProd", {
         ...BASE_PROPS,
         vpc: vpcFor(app, "TestWebProd"),
+        // A certificate is required for the patch to run at all: Cognito
+        // rejects http callback URLs, so the certless path deliberately skips
+        // it outside dev. prod always has a UI domain (bin/app.ts enforces it).
+        customDomain: {
+          uiDomainName: "app.example.com",
+          uiCertificateArn: UI_CERT,
+        },
       }),
     );
 

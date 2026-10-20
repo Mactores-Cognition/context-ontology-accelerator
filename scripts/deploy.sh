@@ -39,6 +39,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # with the internal zone <prefix>-<env>.internal. For a public ACM certificate
 # instead, name a sub-domain delegated to a Route 53 public hosted zone:
 #   SCL_SERVICE_CERT=acm-public SCL_SERVICE_DOMAIN=coa-poc.example.com SCL_PUBLIC_ZONE_ID=Z0123... make deploy-dev
+# Or a certificate already imported into ACM (e.g. the client's own) covering
+# *.<SCL_SERVICE_DOMAIN>, given by its ARN:
+#   SCL_SERVICE_CERT=imported SCL_SERVICE_DOMAIN=coa.example.com SCL_SERVICE_CERT_ARN=arn:aws:acm:... make deploy-dev
 CONTEXT="--context env=$ENV"
 [ -n "${SCL_PREFIX:-}" ]        && CONTEXT="$CONTEXT --context resource_prefix=$SCL_PREFIX"
 [ -n "${SCL_PROJECT_TAG:-}" ]   && CONTEXT="$CONTEXT --context project_tag=$SCL_PROJECT_TAG"
@@ -59,6 +62,7 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_SERVICE_CERT:-}" ] && CONTEXT="$CONTEXT --context service_cert=$SCL_SERVICE_CERT"
 [ -n "${SCL_SERVICE_DOMAIN:-}" ] && CONTEXT="$CONTEXT --context service_domain=$SCL_SERVICE_DOMAIN"
 [ -n "${SCL_PUBLIC_ZONE_ID:-}" ] && CONTEXT="$CONTEXT --context public_zone_id=$SCL_PUBLIC_ZONE_ID"
+[ -n "${SCL_SERVICE_CERT_ARN:-}" ] && CONTEXT="$CONTEXT --context service_cert_arn=$SCL_SERVICE_CERT_ARN"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
 # NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when

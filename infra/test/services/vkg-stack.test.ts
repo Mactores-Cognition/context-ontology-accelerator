@@ -492,6 +492,21 @@ describe("VkgStack in ALB mode (service_discovery=alb)", () => {
       .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
       .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
 
+  test("ALB mode with the client's certificate (imported): the 8080 listener uses it", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    renderVkgWithContext({
+      service_discovery: "alb",
+      service_cert: "imported",
+      service_cert_arn: certArn,
+      service_domain: "coa.example.com",
+    }).hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8080,
+      Protocol: "HTTPS",
+      Certificates: [{ CertificateArn: certArn }],
+    });
+  });
+
   test("ALB mode: HTTPS listener on 8080 answers unknown namespaces with a fixed 404", () => {
     template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
       Port: 8080,

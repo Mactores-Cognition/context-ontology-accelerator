@@ -17,8 +17,10 @@ import {
   resolveContext,
   namespaceTagKey,
   SERVICE_CA_CERT_PARAM_ENV,
+  SERVICE_CERT_ARN_ENV,
   SERVICE_DISCOVERY_ALB,
   serviceCaCertParamName,
+  serviceCertArn,
 } from "../../context";
 import { agentCoreSupportedSubnets } from "../../utils/agentcore-az";
 import { brandEnv } from "../../utils/brand-env";
@@ -502,6 +504,10 @@ export class ServeStack extends SCLStack {
           ...(serviceCaCertParamName(this.node) && {
             [SERVICE_CA_CERT_PARAM_ENV]: serviceCaCertParamName(this.node),
           }),
+          // Or the imported certificate, whose CA chain is read from ACM.
+          ...(serviceCertArn(this.node) && {
+            [SERVICE_CERT_ARN_ENV]: serviceCertArn(this.node),
+          }),
           OPENSEARCH_ENDPOINT: opensearchEndpoint,
           // TODO(aoss-proxy): Remove when AgentCore supports AOSS directly
           OPENSEARCH_PROXY_LAMBDA_ARN: aossProxyFn.functionArn,
@@ -733,6 +739,18 @@ export class ServeStack extends SCLStack {
           ],
         }),
       );
+
+      // Imported certificate on the internal ALB: VKG calls trust the CA
+      // chain kept in ACM with it.
+      const certArn = serviceCertArn(this.node);
+      if (certArn) {
+        runtime.addToRolePolicy(
+          new iam.PolicyStatement({
+            actions: ["acm:GetCertificate"],
+            resources: [certArn],
+          }),
+        );
+      }
 
       // Bedrock — invoke/converse for LLM + embeddings + guardrails
       runtime.addToRolePolicy(

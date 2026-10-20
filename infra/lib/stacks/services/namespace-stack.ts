@@ -21,7 +21,9 @@ import {
   NO_DATAZONE_DOMAIN,
   resolveContext,
   SERVICE_CA_CERT_PARAM_ENV,
+  SERVICE_CERT_ARN_ENV,
   serviceCaCertParamName,
+  serviceCertArn,
 } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NamespaceDeletionPipeline } from "./namespace-deletion-pipeline";
@@ -216,6 +218,10 @@ export class NamespaceStack extends SCLStack {
           ...(serviceCaCertParamName(this.node) && {
             [SERVICE_CA_CERT_PARAM_ENV]: serviceCaCertParamName(this.node),
           }),
+          // Or the imported certificate, whose CA chain is read from ACM.
+          ...(serviceCertArn(this.node) && {
+            [SERVICE_CERT_ARN_ENV]: serviceCertArn(this.node),
+          }),
           // Lets get_handler resolve VKG service health from ECS
           // (resolve_vkg_health). Absent this var the resolver short-circuits
           // to UNKNOWN for every namespace.
@@ -239,7 +245,8 @@ export class NamespaceStack extends SCLStack {
     // Ontology induction jobs are checked via an HTTP call to the
     // ontology-engine (see delete_handler._check_active_induction_jobs) —
     // no DynamoDB grant needed for that check. Over HTTPS with a private CA
-    // the call reads the CA root from SSM.
+    // the call reads the CA root from SSM; with an imported certificate it
+    // reads the CA chain from ACM.
     const caCertParam = serviceCaCertParamName(this.node);
     if (caCertParam) {
       namespaceApiFn.addToRolePolicy(
@@ -248,6 +255,15 @@ export class NamespaceStack extends SCLStack {
           resources: [
             `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${caCertParam}`,
           ],
+        }),
+      );
+    }
+    const certArn = serviceCertArn(this.node);
+    if (certArn) {
+      namespaceApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["acm:GetCertificate"],
+          resources: [certArn],
         }),
       );
     }

@@ -669,3 +669,83 @@ describe("NetworkStack HTTPS for the internal ALB", () => {
     template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
   });
 });
+
+// The client's own certificate (replace-cloud-map-notes.txt section 18): the
+// client imports it into ACM and the deploy takes its ARN
+// (service_cert=imported). It covers the services' names under the client's
+// subdomain, so no Private CA; an alarm warns before it expires because
+// imported certificates do not renew.
+describe("NetworkStack with the client's certificate (service_cert=imported)", () => {
+  const CERT_ARN =
+    "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+  const IMPORTED = {
+    service_discovery: "alb",
+    service_cert: "imported",
+    service_cert_arn: CERT_ARN,
+    service_domain: "coa.example.com",
+  };
+  const expiryAlarms = (template: Template): any[] =>
+    Object.values(
+      template.findResources("AWS::CloudWatch::Alarm", {
+        Properties: { MetricName: "DaysToExpiry" },
+      }),
+    );
+
+  it("imported: private zone and records under the client's subdomain", () => {
+    const template = buildStack(IMPORTED);
+    template.hasResourceProperties("AWS::Route53::HostedZone", {
+      Name: "coa.example.com.",
+    });
+    for (const name of ["ontology-engine.coa.example.com.", "vkg.coa.example.com."]) {
+      template.hasResourceProperties("AWS::Route53::RecordSet", { Name: name, Type: "A" });
+    }
+  });
+
+  it("imported: no Private CA, no new certificate, no CA parameter", () => {
+    const template = buildStack(IMPORTED);
+    template.resourceCountIs("AWS::ACMPCA::CertificateAuthority", 0);
+    template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+    expect(
+      Object.keys(
+        template.findResources("AWS::SSM::Parameter", {
+          Properties: { Name: "/coa/services/ca-cert" },
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("imported: alarm when the certificate has less than 30 days left", () => {
+    const [alarm] = expiryAlarms(buildStack(IMPORTED));
+    expect(alarm).toBeDefined();
+    expect(alarm.Properties).toMatchObject({
+      Namespace: "AWS/CertificateManager",
+      Threshold: 30,
+      ComparisonOperator: "LessThanThreshold",
+      Dimensions: [{ Name: "CertificateArn", Value: CERT_ARN }],
+    });
+  });
+
+  it("imported without service_cert_arn fails synth", () => {
+    expect(() =>
+      buildStack({
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_domain: "coa.example.com",
+      }),
+    ).toThrow(/service_cert_arn/);
+  });
+
+  it("imported without service_domain fails synth", () => {
+    expect(() =>
+      buildStack({
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: CERT_ARN,
+      }),
+    ).toThrow(/service_domain/);
+  });
+
+  it("private-ca (default): no expiry alarm (the CA renews its certificate)", () => {
+    expect(expiryAlarms(buildStack({ service_discovery: "alb" }))).toHaveLength(0);
+  });
+});

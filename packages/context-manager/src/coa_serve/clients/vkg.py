@@ -97,7 +97,8 @@ class VKGClient:
 
     async def _get_http(self) -> httpx.AsyncClient:
         if self._http is None:
-            # Behind the internal ALB with AWS Private CA, verify against that CA.
+            # Behind the internal ALB with AWS Private CA or an imported
+            # certificate, verify against that CA.
             ctx = ssl_context()
             self._http = httpx.AsyncClient(
                 base_url=self._base_url,

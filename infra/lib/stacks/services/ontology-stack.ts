@@ -28,7 +28,9 @@ import {
   METADATA_STORE_DYNAMODB,
   resolveContext,
   SERVICE_CA_CERT_PARAM_ENV,
+  SERVICE_CERT_ARN_ENV,
   serviceCaCertParamName,
+  serviceCertArn,
 } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
@@ -178,6 +180,7 @@ export class OntologyStack extends SCLStack {
       : `http://ontology-engine.${namespace!.namespaceName}:${this.containerPort}`;
     const tlsPort = ONTOLOGY_ENGINE_TLS_PORT;
     const caCertParam = serviceCaCertParamName(this.node);
+    const certArn = serviceCertArn(this.node);
 
     // ── Cross-stack table names via SSM ──────────────────────────────
     // We avoid direct construct prop refs (which create CloudFormation
@@ -1180,6 +1183,8 @@ export class OntologyStack extends SCLStack {
         ONTOLOGY_ENGINE_ENDPOINT: serviceEndpoint,
         // Private CA root for verifying the ALB certificate (ALB mode only).
         ...(caCertParam && { [SERVICE_CA_CERT_PARAM_ENV]: caCertParam }),
+        // Or the imported certificate, whose CA chain is read from ACM.
+        ...(certArn && { [SERVICE_CERT_ARN_ENV]: certArn }),
         SOURCES_TABLE: sourcesTableName,
         NEPTUNE_ENDPOINT: props.neptuneClusterEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
@@ -1193,6 +1198,14 @@ export class OntologyStack extends SCLStack {
           resources: [
             `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${caCertParam}`,
           ],
+        }),
+      );
+    }
+    if (certArn) {
+      apiProxyFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["acm:GetCertificate"],
+          resources: [certArn],
         }),
       );
     }

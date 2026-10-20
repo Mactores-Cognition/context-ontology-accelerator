@@ -732,6 +732,44 @@ describe("OntologyStack in ALB mode (service_discovery=alb)", () => {
     ).toBe(true);
   });
 
+  test("ALB mode with the client's certificate (imported): listener uses it; api-proxy trusts it through ACM", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    const t = renderAlb(
+      {
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: certArn,
+        service_domain: "coa.example.com",
+      },
+      "CertOntology",
+    );
+    t.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8001,
+      Protocol: "HTTPS",
+      Certificates: [{ CertificateArn: certArn }],
+    });
+    const fns = Object.values(t.findResources("AWS::Lambda::Function")) as any[];
+    const proxy = fns.find(
+      (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    const vars = proxy.Properties.Environment.Variables;
+    expect(vars.ONTOLOGY_ENGINE_ENDPOINT).toBe(
+      "https://ontology-engine.coa.example.com:8001",
+    );
+    expect(vars.SERVICE_CERT_ARN).toBe(certArn);
+    expect(vars).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+    const statements = Object.values(t.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (s: any) =>
+          [s.Action].flat().includes("acm:GetCertificate") &&
+          JSON.stringify(s.Resource) === JSON.stringify(certArn),
+      ),
+    ).toBe(true);
+  });
+
   test("ALB mode: publishes no Cloud Map namespace ARN", () => {
     expect(
       Object.keys(

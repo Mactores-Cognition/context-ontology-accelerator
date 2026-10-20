@@ -714,10 +714,12 @@ section is what the code does.
 
 ### Verification status
 
-**Passing:** `pnpm nx run infra:test` — 37 suites, 909 tests, 97.5% line
-coverage against the 80% gate. `scripts/ci/check-license-headers.sh` passes,
-`bash -n` is clean on every modified shell script, and a repo-wide grep shows no
-unintended CloudFront references remain.
+**Passing:** `pnpm nx run infra:test` (37 suites, 909 tests, 97.5% line coverage
+against the 80% gate), `cdk synth` over the whole app, `make lint`,
+`uv run pytest tests/unit -q`, and `scripts/ci/check-license-headers.sh`.
+`bash -n` is clean on every modified shell script, a repo-wide grep shows no
+unintended CloudFront references remain, and the removed `cloudfront_web_acl_id`
+key fails synth with its intended message.
 
 Getting there took five rounds of fixes, all caught by the toolchain rather than
 by review: `SslPolicy.RECOMMENDED_TLS13` does not exist (it is
@@ -729,9 +731,7 @@ port numbers, and an IAM matcher describing a statement that had been removed.
 config and the header matrix have never been executed, and CI never covers them
 — `pr.yml` sets `CDK_BUNDLING_STACKS: "[]"`, and Docker image assets are not
 built at synth regardless. The `apk add aws-cli` line and the `add_header`
-inheritance behaviour are the two places most likely to need a correction. Also
-unverified: `cdk synth` in both listener modes, `make lint`, and
-`pytest tests/unit`.
+inheritance behaviour are the two places most likely to need a correction.
 10. **The UI ALB has no S3 access logging.** The plan called for an
    `AccessLogsBucket` wired via `logAccessLogs()`, but that resolves the
    regional ELB log-delivery account at synth time and **every stack in this app

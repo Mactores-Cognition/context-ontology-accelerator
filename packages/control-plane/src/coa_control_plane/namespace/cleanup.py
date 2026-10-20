@@ -497,7 +497,8 @@ def delete_all_ontologies(namespace_id: str) -> None:
     req = urllib_request.Request(url, method="DELETE")
 
     try:
-        # ssl_context(): trusts the private CA behind the internal ALB; None otherwise.
+        # ssl_context(): trusts the CA behind the internal ALB (private CA or imported
+        # certificate); None otherwise.
         with urllib_request.urlopen(req, timeout=120, context=ssl_context()) as resp:  # noqa: S310
             body = json.loads(resp.read().decode("utf-8"))
             logger.info(

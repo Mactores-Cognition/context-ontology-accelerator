@@ -864,4 +864,57 @@ describe("NamespaceStack in ALB mode (service_discovery=alb)", () => {
       ),
     ).toBe(true);
   });
+
+  test("ALB mode with the client's certificate (imported): the namespace API trusts it through ACM", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    const app = new cdk.App({
+      context: {
+        ...TEST_CONTEXT,
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: certArn,
+        service_domain: "coa.example.com",
+      },
+    });
+    const depStack = new cdk.Stack(app, "CertDepStack");
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+      allowAllOutbound: true,
+    });
+    const table = (id: string) =>
+      new dynamodb.Table(depStack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+    const tpl = Template.fromStack(
+      new NamespaceStack(app, "TestNamespaceCert", {
+        vpc,
+        lambdaSecurityGroup,
+        rolesTable: table("Roles"),
+        resourceRoleMappingsTable: table("RRM"),
+        vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/coa-test-vkg",
+        vkgListenerArn:
+          "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/coa-svc/abc/def",
+      }),
+    );
+    const api = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp("namespace-api$") },
+      }),
+    )[0] as any;
+    const vars = api.Properties.Environment.Variables;
+    expect(vars.SERVICE_CERT_ARN).toBe(certArn);
+    expect(vars).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+    const statements = Object.values(tpl.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => (p.Properties.PolicyName as string).includes("NamespaceApiFn"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (st: any) =>
+          [st.Action].flat().includes("acm:GetCertificate") &&
+          JSON.stringify(st.Resource) === JSON.stringify(certArn),
+      ),
+    ).toBe(true);
+  });
 });

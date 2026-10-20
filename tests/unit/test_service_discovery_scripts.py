@@ -64,3 +64,11 @@ def test_deploy_passes_the_https_certificate_settings() -> None:
     ):
         assert env_var in text, f"deploy.sh does not read {env_var}"
         assert f"--context {context_key}=" in text, f"deploy.sh does not pass the {context_key} CDK context"
+
+
+def test_deploy_passes_the_client_certificate_arn() -> None:
+    # The client's own certificate (replace-cloud-map-notes.txt section 18):
+    # SCL_SERVICE_CERT=imported with the certificate's ACM ARN.
+    text = (_SCRIPTS / "deploy.sh").read_text()
+    assert "SCL_SERVICE_CERT_ARN" in text, "deploy.sh does not read SCL_SERVICE_CERT_ARN"
+    assert "--context service_cert_arn=" in text, "deploy.sh does not pass the service_cert_arn CDK context"

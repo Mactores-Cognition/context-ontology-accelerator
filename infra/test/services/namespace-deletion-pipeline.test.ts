@@ -550,4 +550,60 @@ describe("NamespaceDeletionPipeline in ALB mode (service_discovery=alb)", () => 
       ),
     ).toBe(true);
   });
+
+  test("ALB mode with the client's certificate (imported): DeleteOntologyFn trusts it through ACM", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    const app = new cdk.App({
+      context: {
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: certArn,
+        service_domain: "coa.example.com",
+      },
+    });
+    const stack = new cdk.Stack(app, "CertStack");
+    const vpc = new ec2.Vpc(stack, "Vpc");
+    const table = (id: string) =>
+      new dynamodb.Table(stack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+    new NamespaceDeletionPipeline(stack, "DeletionPipeline", {
+      prefixed: (name: string) => `coa-dev-${name}`,
+      lambdaCode: lambda.Code.fromInline("def handler(event, context): pass"),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      namespacesTable: table("Namespaces"),
+      resourceRoleMappingsTable: table("RRM"),
+      rolesTable: table("Roles"),
+      sourcesApiFnName: "coa-dev-sources-api",
+      metricApiFnName: "coa-dev-metric-api",
+      datazoneDomainId: "dzd-123",
+      namespaceApiFnRoleArn:
+        "arn:aws:iam::123456789012:role/coa-dev-namespace-api",
+      vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/vkg",
+      vkgListenerArn: LISTENER_ARN,
+      ontologyBucketName: "coa-dev-ontology-artifacts",
+      resourcePrefix: "coa-dev-",
+    });
+    const tpl = Template.fromStack(stack);
+    const fn = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: "coa-dev-ns-deletion-ontology" },
+      }),
+    )[0] as any;
+    const vars = fn.Properties.Environment.Variables;
+    expect(vars.SERVICE_CERT_ARN).toBe(certArn);
+    expect(vars).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+    const statements = Object.values(tpl.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => (p.Properties.PolicyName as string).includes("DeleteOntologyFn"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (st: any) =>
+          [st.Action].flat().includes("acm:GetCertificate") &&
+          JSON.stringify(st.Resource) === JSON.stringify(certArn),
+      ),
+    ).toBe(true);
+  });
 });

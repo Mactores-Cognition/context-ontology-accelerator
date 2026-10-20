@@ -11,6 +11,8 @@ Environment:
     ONTOLOGY_ENGINE_ENDPOINT: Internal endpoint (e.g. http://ontology-engine:8001)
     SERVICE_CA_CERT_PARAM: SSM parameter with the private CA root (internal ALB with
         AWS Private CA only); see coa_common.service_tls
+    SERVICE_CERT_ARN: ACM ARN of an imported certificate on the internal ALB, whose
+        CA chain is trusted (imported certificate only); see coa_common.service_tls
 """
 
 from __future__ import annotations
@@ -284,7 +286,8 @@ def handler(event: dict, context) -> dict:
     req = urllib_request.Request(url, data=data, headers=headers, method=method)
 
     try:
-        # ssl_context(): trusts the private CA behind the internal ALB; None otherwise.
+        # ssl_context(): trusts the CA behind the internal ALB (private CA or imported
+        # certificate); None otherwise.
         with urllib_request.urlopen(req, timeout=60, context=ssl_context()) as resp:
             resp_body = resp.read().decode("utf-8")
             return {

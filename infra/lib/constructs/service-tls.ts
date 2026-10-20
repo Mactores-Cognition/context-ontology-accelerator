@@ -1,12 +1,17 @@
 import * as cdk from "aws-cdk-lib";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as acmpca from "aws-cdk-lib/aws-acmpca";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
-import { SERVICE_CERT_PRIVATE_CA, type ServiceTlsSettings } from "../context";
+import {
+  SERVICE_CERT_IMPORTED,
+  SERVICE_CERT_PRIVATE_CA,
+  type ServiceTlsSettings,
+} from "../context";
 
 export interface ServiceTlsProps {
   /** VPC the private hosted zone is attached to. */
@@ -18,12 +23,18 @@ export interface ServiceTlsProps {
    * it to their trust store.
    */
   readonly caCertParameterName?: string;
+  /**
+   * Name of the alarm that warns before an imported certificate expires
+   * (imported certificates do not renew).
+   */
+  readonly expiryAlarmName?: string;
 }
 
 /**
  * Names and a certificate for COA's own services behind the internal ALB
  * (`service_discovery=alb`): a Route 53 private hosted zone, and a certificate
- * for `*.<zone>` from AWS Private CA (default) or a public ACM certificate.
+ * for `*.<zone>` from AWS Private CA (default), a public ACM certificate, or a
+ * certificate already in ACM given by ARN (e.g. the client's own).
  *
  * The private CA is a general-purpose root (ACM cannot issue from a
  * short-lived-mode CA). CloudFormation deletes the activation first on stack
@@ -49,6 +60,8 @@ export class ServiceTls extends Construct {
 
     if (settings.mode === SERVICE_CERT_PRIVATE_CA) {
       this.certificate = this.privateCaCertificate(props);
+    } else if (settings.mode === SERVICE_CERT_IMPORTED) {
+      this.certificate = this.importedCertificate(props);
     } else {
       const publicZone = route53.HostedZone.fromHostedZoneAttributes(
         this,
@@ -60,6 +73,28 @@ export class ServiceTls extends Construct {
         validation: acm.CertificateValidation.fromDns(publicZone),
       });
     }
+  }
+
+  /**
+   * A certificate imported into ACM outside this stack. ACM does not renew it,
+   * so an alarm fires when fewer than 30 days are left; whoever owns it
+   * re-imports a new one to the same ARN.
+   */
+  private importedCertificate(props: ServiceTlsProps): acm.ICertificate {
+    const certificate = acm.Certificate.fromCertificateArn(
+      this,
+      "Certificate",
+      props.settings.certificateArn!,
+    );
+    new cloudwatch.Alarm(this, "CertificateExpiryAlarm", {
+      alarmName: props.expiryAlarmName,
+      alarmDescription: `Certificate for *.${props.settings.domainName} expires in less than 30 days; re-import a renewed one to the same ARN`,
+      metric: certificate.metricDaysToExpiry(),
+      threshold: 30,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+    });
+    return certificate;
   }
 
   private privateCaCertificate(props: ServiceTlsProps): acm.ICertificate {

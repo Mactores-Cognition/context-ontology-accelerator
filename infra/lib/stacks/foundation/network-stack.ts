@@ -570,6 +570,7 @@ export class NetworkStack extends SCLStack {
       vpc: this.vpc,
       settings: resolveServiceTls(this.node),
       caCertParameterName: serviceCaCertParamName(this.node),
+      expiryAlarmName: this.prefixed("service-cert-expiry"),
     });
     const target = route53.RecordTarget.fromAlias(
       new route53Targets.LoadBalancerTarget(alb),

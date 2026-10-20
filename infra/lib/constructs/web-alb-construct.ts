@@ -286,9 +286,10 @@ export class WebAlbConstruct extends SCLConstruct {
         port: 443,
         protocol: elbv2.ApplicationProtocol.HTTPS,
         certificates: [elbv2.ListenerCertificate.fromArn(certificateArn)],
-        // CDK defaults to ELBSecurityPolicy-2016-08, which still allows
-        // TLS 1.0/1.1 — a downgrade from CloudFront's TLS_V1_2_2021.
-        sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS13,
+        // ELBSecurityPolicy-TLS13-1-2-2021-06. CDK otherwise defaults to
+        // ELBSecurityPolicy-2016-08, which still allows TLS 1.0/1.1 — a
+        // downgrade from CloudFront's TLS_V1_2_2021.
+        sslPolicy: elbv2.SslPolicy.RECOMMENDED_TLS,
         defaultTargetGroups: [targetGroup],
       });
       this.loadBalancer.addListener("HttpRedirect", {

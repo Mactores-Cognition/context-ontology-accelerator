@@ -275,6 +275,8 @@ describe("buildContentSecurityPolicy — Cognito hosted-UI origin (issue #130)",
 });
 
 describe("buildContentSecurityPolicy (insecure transport)", () => {
+  const HOSTED_UI_PREFIX = "coa-prod-auth-123456789012";
+
   it("emits upgrade-insecure-requests by default", () => {
     expect(buildContentSecurityPolicy(baseConfig)).toContain(
       "upgrade-insecure-requests",
@@ -290,11 +292,15 @@ describe("buildContentSecurityPolicy (insecure transport)", () => {
   });
 
   it("changes nothing else on the insecure path", () => {
-    const secure = buildContentSecurityPolicy(baseConfig, undefined, PREFIX);
+    const secure = buildContentSecurityPolicy(
+      baseConfig,
+      undefined,
+      HOSTED_UI_PREFIX,
+    );
     const insecure = buildContentSecurityPolicy(
       baseConfig,
       undefined,
-      PREFIX,
+      HOSTED_UI_PREFIX,
       true,
     );
     expect(insecure).toBe(

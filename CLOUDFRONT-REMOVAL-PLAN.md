@@ -714,18 +714,24 @@ section is what the code does.
 
 ### Verification status
 
-**None of this has been compiled or tested.** This checkout has no
-`node_modules`, no `smithy-generated/`, no Java/Gradle, no `uv`, and Python 3.9
-rather than 3.12 — and the Docker daemon was not running — so `tsc`, `jest`,
-`pytest` and `docker build` could all not be run. What *was* checked:
-`scripts/ci/check-license-headers.sh` passes, `bash -n` is clean on every
-modified shell script, and a repo-wide grep shows no unintended CloudFront
-references remain.
+**Passing:** `pnpm nx run infra:test` — 37 suites, 909 tests, 97.5% line
+coverage against the 80% gate. `scripts/ci/check-license-headers.sh` passes,
+`bash -n` is clean on every modified shell script, and a repo-wide grep shows no
+unintended CloudFront references remain.
 
-Run `make setup`, then the commands in the Verification section above. Treat the
-first `docker build` and the first `cdk synth` as the real review of this change;
-the `apk add aws-cli` line and the nginx config are the two places most likely to
-need a correction.
+Getting there took five rounds of fixes, all caught by the toolchain rather than
+by review: `SslPolicy.RECOMMENDED_TLS13` does not exist (it is
+`RECOMMENDED_TLS`), a `PREFIX` reference out of scope, `logAccessLogs()` in an
+environment-agnostic stack (deviation 10), a lexicographic `Array.sort()` on
+port numbers, and an IAM matcher describing a statement that had been removed.
+
+**Still unverified:** the container. `docker build`, the entrypoint, the nginx
+config and the header matrix have never been executed, and CI never covers them
+— `pr.yml` sets `CDK_BUNDLING_STACKS: "[]"`, and Docker image assets are not
+built at synth regardless. The `apk add aws-cli` line and the `add_header`
+inheritance behaviour are the two places most likely to need a correction. Also
+unverified: `cdk synth` in both listener modes, `make lint`, and
+`pytest tests/unit`.
 10. **The UI ALB has no S3 access logging.** The plan called for an
    `AccessLogsBucket` wired via `logAccessLogs()`, but that resolves the
    regional ELB log-delivery account at synth time and **every stack in this app

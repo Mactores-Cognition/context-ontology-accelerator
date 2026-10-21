@@ -4,6 +4,7 @@
 import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
+import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
@@ -20,8 +21,10 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { SclMonitoring } from "../../constructs";
 import { BRAND } from "../../constants";
 import {
+  isAlbServiceDiscovery,
   resolveContext,
   resolveLambdaReservedConcurrency,
+  SERVICE_DISCOVERY_ALB,
 } from "../../context";
 import { NetworkStack } from "../foundation/network-stack";
 
@@ -36,8 +39,11 @@ export interface VkgStackProps extends cdk.StackProps {
    */
   readonly ontologyBucket: s3.IBucket;
 
-  /** Shared Cloud Map private DNS namespace for service discovery. */
-  readonly serviceNamespace: servicediscovery.IPrivateDnsNamespace;
+  /**
+   * Shared Cloud Map private DNS namespace for service discovery. Required
+   * unless `service_discovery=alb`, where `network.servicesAlb` is used.
+   */
+  readonly serviceNamespace?: servicediscovery.IPrivateDnsNamespace;
 
   /** Fargate CPU units (default: 1024 = 1 vCPU). */
   readonly cpu?: number;
@@ -83,6 +89,13 @@ export class VkgStack extends SCLStack {
   /** S3 bucket holding ontology artifacts. */
   public readonly ontologyBucket: s3.IBucket;
 
+  /**
+   * Listener on the internal services ALB that routes to the per-namespace
+   * VKG services (`service_discovery=alb` only). The reload Lambda adds one
+   * rule per namespace; namespace delete removes it.
+   */
+  public readonly vkgListener?: elbv2.ApplicationListener;
+
   constructor(scope: Construct, id: string, props: VkgStackProps) {
     super(scope, id, props);
     this.addComponentTag("vkg");
@@ -106,8 +119,24 @@ export class VkgStack extends SCLStack {
       `-Xmx${Math.max(512, Math.floor((memoryLimitMiB * 3) / 4))}m ` +
         `-Xms${Math.max(256, Math.floor(memoryLimitMiB / 4))}m`;
     this.containerPort = props.containerPort ?? 8080;
+    // Cloud Map (default) or the internal ALB (service_discovery=alb).
+    const albMode = isAlbServiceDiscovery(this.node);
     const namespace = props.serviceNamespace;
-    const cloudMapNamespaceName = namespace.namespaceName;
+    const servicesAlb = props.network.servicesAlb;
+    if (albMode ? !servicesAlb : !namespace) {
+      throw new Error(
+        albMode
+          ? "VkgStack with service_discovery=alb requires network.servicesAlb."
+          : "VkgStack requires serviceNamespace (Cloud Map).",
+      );
+    }
+    // Callers rewrite vkg. -> vkg-{ns}. with Cloud Map; with the ALB they keep
+    // this URL and send the namespace in the X-Coa-Namespace header.
+    // ALB mode is HTTPS-only: callers use the name in the private zone, which
+    // the ALB certificate covers.
+    const vkgEndpoint = albMode
+      ? `https://vkg.${props.network.serviceTls!.domainName}:${this.containerPort}`
+      : `http://vkg.${namespace!.namespaceName}:${this.containerPort}`;
 
     this.ontologyBucket = props.ontologyBucket;
 
@@ -169,6 +198,9 @@ export class VkgStack extends SCLStack {
         ONTOLOGY_PREFIX: "ontologies/",
         ENDPOINT_PORT: String(this.containerPort),
         ONTOP_JAVA_ARGS: ontopJavaArgs,
+        // ALB mode: entrypoint.sh makes a self-signed certificate and the
+        // facade serves HTTPS (the ALB does not validate target certificates).
+        ...(albMode && { SERVICE_TLS: "1" }),
       },
       portMappings: [
         {
@@ -182,7 +214,9 @@ export class VkgStack extends SCLStack {
       healthCheck: {
         command: [
           "CMD-SHELL",
-          `curl -sf http://localhost:${this.containerPort}/health || exit 1`,
+          albMode
+            ? `curl -sfk https://localhost:${this.containerPort}/health || exit 1`
+            : `curl -sf http://localhost:${this.containerPort}/health || exit 1`,
         ],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(10),
@@ -211,13 +245,34 @@ export class VkgStack extends SCLStack {
       }),
     );
 
-    // Allow inbound traffic on the container port from within the VPC
-    // (per-namespace VKG services use this security group)
-    ecsSecurityGroup.addIngressRule(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
-      ec2.Port.tcp(this.containerPort),
-      "Allow VKG SPARQL translation from VPC",
-    );
+    if (albMode) {
+      // Internal ALB: one rule per namespace (header X-Coa-Namespace), added at
+      // runtime by the reload Lambda. Anything else gets a 404. Traffic to the
+      // tasks comes only from the ALB (NetworkStack.createServicesAlb).
+      this.vkgListener = new elbv2.ApplicationListener(this, "VkgListener", {
+        loadBalancer: servicesAlb!,
+        port: this.containerPort,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [
+          elbv2.ListenerCertificate.fromCertificateManager(
+            props.network.serviceTls!.certificate,
+          ),
+        ],
+        open: false,
+        defaultAction: elbv2.ListenerAction.fixedResponse(404, {
+          contentType: "text/plain",
+          messageBody: "unknown namespace",
+        }),
+      });
+    } else {
+      // Allow inbound traffic on the container port from within the VPC
+      // (per-namespace VKG services use this security group)
+      ecsSecurityGroup.addIngressRule(
+        ec2.Peer.ipv4(vpc.vpcCidrBlock),
+        ec2.Port.tcp(this.containerPort),
+        "Allow VKG SPARQL translation from VPC",
+      );
+    }
 
     // ================================================================
     // SSM: VKG container image URI (source of truth for reload Lambda)
@@ -249,7 +304,13 @@ export class VkgStack extends SCLStack {
       environment: {
         CLUSTER_ARN: this.cluster.clusterArn,
         RESOURCE_PREFIX: resourcePrefix,
-        CLOUD_MAP_NAMESPACE_ID: namespace.namespaceId,
+        ...(albMode
+          ? {
+              SERVICE_DISCOVERY_BACKEND: SERVICE_DISCOVERY_ALB,
+              VKG_LISTENER_ARN: this.vkgListener!.listenerArn,
+              VPC_ID: vpc.vpcId,
+            }
+          : { CLOUD_MAP_NAMESPACE_ID: namespace!.namespaceId }),
         VKG_TASK_ROLE_ARN: taskDef.taskRole.roleArn,
         VKG_EXECUTION_ROLE_ARN: taskDef.executionRole!.roleArn,
         ONTOLOGY_BUCKET: this.ontologyBucket.bucketName,
@@ -313,15 +374,45 @@ export class VkgStack extends SCLStack {
         },
       }),
     );
-    reloadFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "servicediscovery:CreateService",
-          "servicediscovery:ListServices",
-        ],
-        resources: ["*"],
-      }),
-    );
+    if (albMode) {
+      // Per-namespace target group + listener rule (see vkg-reload/index.py).
+      // Target group names are vkg-<hash>; rules belong to this listener.
+      reloadFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "elasticloadbalancing:CreateTargetGroup",
+            "elasticloadbalancing:ModifyTargetGroupAttributes",
+            "elasticloadbalancing:CreateRule",
+            "elasticloadbalancing:AddTags",
+          ],
+          resources: [
+            `arn:${this.partition}:elasticloadbalancing:${this.region}:${this.account}:targetgroup/vkg-*/*`,
+            this.vkgListener!.listenerArn,
+            `arn:${this.partition}:elasticloadbalancing:${this.region}:${this.account}:listener-rule/app/*`,
+          ],
+        }),
+      );
+      // Describe* actions have no resource-level scoping.
+      reloadFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "elasticloadbalancing:DescribeRules",
+            "elasticloadbalancing:DescribeTargetGroups",
+          ],
+          resources: ["*"],
+        }),
+      );
+    } else {
+      reloadFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "servicediscovery:CreateService",
+            "servicediscovery:ListServices",
+          ],
+          resources: ["*"],
+        }),
+      );
+    }
     reloadFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -451,10 +542,21 @@ export class VkgStack extends SCLStack {
 
     new ssm.StringParameter(this, "SsmVkgEndpoint", {
       parameterName: `${ssmPrefix}/vkg/endpoint`,
-      stringValue: `http://vkg.${cloudMapNamespaceName}:${this.containerPort}`,
-      description:
-        "VKG endpoint pattern (per-namespace services resolve as vkg-{ns}.domain:port)",
+      stringValue: vkgEndpoint,
+      description: albMode
+        ? "VKG endpoint (internal services ALB; namespace in the X-Coa-Namespace header)"
+        : "VKG endpoint pattern (per-namespace services resolve as vkg-{ns}.domain:port)",
     });
+
+    if (albMode) {
+      // Read by scripts/destroy.sh Step 4 to remove the per-namespace rules and
+      // target groups the reload Lambda created (CloudFormation does not own them).
+      new ssm.StringParameter(this, "SsmVkgListenerArn", {
+        parameterName: `${ssmPrefix}/vkg/listener-arn`,
+        stringValue: this.vkgListener!.listenerArn,
+        description: "VKG listener ARN on the internal services ALB",
+      });
+    }
 
     // ================================================================
     // CfnOutputs
@@ -465,8 +567,10 @@ export class VkgStack extends SCLStack {
     });
 
     new cdk.CfnOutput(this, "VkgEndpointPattern", {
-      value: `http://vkg.${cloudMapNamespaceName}:${this.containerPort}`,
-      description: "VKG endpoint pattern (per-namespace: vkg-{ns}.domain:port)",
+      value: vkgEndpoint,
+      description: albMode
+        ? "VKG endpoint (internal services ALB; namespace in the X-Coa-Namespace header)"
+        : "VKG endpoint pattern (per-namespace: vkg-{ns}.domain:port)",
     });
   }
 }

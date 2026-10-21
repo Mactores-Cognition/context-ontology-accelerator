@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Unit tests for coa_common.metadata_store.dynamodb.DynamoDBMetadataStore.
 
 The store replaces DataZone with one DynamoDB table (created by NamespaceStack

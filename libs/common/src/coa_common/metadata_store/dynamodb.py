@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """DynamoDB implementation of MetadataStoreClient.
 
 Used instead of SageMaker Unified Studio (DataZone) when the stack is deployed

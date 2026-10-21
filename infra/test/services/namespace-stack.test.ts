@@ -799,3 +799,122 @@ describe("NamespaceStack in DynamoDB mode (metadata_store=dynamodb)", () => {
     });
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): the VKG listener
+// ARN reaches the deletion pipeline so namespace delete can remove the
+// namespace's listener rule and target group.
+describe("NamespaceStack in ALB mode (service_discovery=alb)", () => {
+  test("ALB mode: DeletePlatform gets the VKG listener ARN and no Cloud Map namespace", () => {
+    const listenerArn =
+      "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/coa-svc/abc/def";
+    const app = new cdk.App({
+      context: { ...TEST_CONTEXT, service_discovery: "alb" },
+    });
+    const depStack = new cdk.Stack(app, "AlbDepStack");
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+      allowAllOutbound: true,
+    });
+    const rolesTable = new dynamodb.Table(depStack, "Roles", {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    });
+    const rrmTable = new dynamodb.Table(depStack, "RRM", {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    });
+    const tpl = Template.fromStack(
+      new NamespaceStack(app, "TestNamespaceAlb", {
+        vpc,
+        lambdaSecurityGroup,
+        rolesTable,
+        resourceRoleMappingsTable: rrmTable,
+        vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/coa-test-vkg",
+        vkgListenerArn: listenerArn,
+      }),
+    );
+    const fn = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp("ns-deletion-platform$") },
+      }),
+    )[0] as any;
+    expect(fn).toBeDefined();
+    const vars = fn.Properties.Environment.Variables;
+    expect(vars.VKG_LISTENER_ARN).toBe(listenerArn);
+    expect(vars.SERVICE_DISCOVERY_BACKEND).toBe("alb");
+    expect(vars).not.toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+
+    // HTTPS: the namespace API (active-jobs check on ontology-engine) trusts
+    // the private CA through the CA root in SSM.
+    const api = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp("namespace-api$") },
+      }),
+    )[0] as any;
+    expect(api.Properties.Environment.Variables.SERVICE_CA_CERT_PARAM).toBe(
+      "/coa/services/ca-cert",
+    );
+    const statements = Object.values(tpl.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => (p.Properties.PolicyName as string).includes("NamespaceApiFn"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (st: any) =>
+          [st.Action].flat().includes("ssm:GetParameter") &&
+          JSON.stringify(st.Resource).includes("/coa/services/ca-cert"),
+      ),
+    ).toBe(true);
+  });
+
+  test("ALB mode with the client's certificate (imported): the namespace API trusts it through ACM", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    const app = new cdk.App({
+      context: {
+        ...TEST_CONTEXT,
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: certArn,
+        service_domain: "coa.example.com",
+      },
+    });
+    const depStack = new cdk.Stack(app, "CertDepStack");
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const lambdaSecurityGroup = new ec2.SecurityGroup(depStack, "LambdaSG", {
+      vpc,
+      allowAllOutbound: true,
+    });
+    const table = (id: string) =>
+      new dynamodb.Table(depStack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+    const tpl = Template.fromStack(
+      new NamespaceStack(app, "TestNamespaceCert", {
+        vpc,
+        lambdaSecurityGroup,
+        rolesTable: table("Roles"),
+        resourceRoleMappingsTable: table("RRM"),
+        vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/coa-test-vkg",
+        vkgListenerArn:
+          "arn:aws:elasticloadbalancing:us-east-1:123456789012:listener/app/coa-svc/abc/def",
+      }),
+    );
+    const api = Object.values(
+      tpl.findResources("AWS::Lambda::Function", {
+        Properties: { FunctionName: Match.stringLikeRegexp("namespace-api$") },
+      }),
+    )[0] as any;
+    const vars = api.Properties.Environment.Variables;
+    expect(vars.SERVICE_CERT_ARN).toBe(certArn);
+    expect(vars).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+    const statements = Object.values(tpl.findResources("AWS::IAM::Policy"))
+      .filter((p: any) => (p.Properties.PolicyName as string).includes("NamespaceApiFn"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (st: any) =>
+          [st.Action].flat().includes("acm:GetCertificate") &&
+          JSON.stringify(st.Resource) === JSON.stringify(certArn),
+      ),
+    ).toBe(true);
+  });
+});

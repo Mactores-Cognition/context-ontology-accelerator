@@ -36,6 +36,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Table-metadata store (default DataZone). dynamodb stores it in a DynamoDB
 # table and deploys no DataZone domain, so no SMUS admin principal is needed:
 #   SCL_METADATA_STORE=dynamodb make deploy-dev
+# Service discovery for ontology-engine and VKG (default Cloud Map). alb puts
+# them behind one internal ALB instead (for accounts without Cloud Map):
+#   SCL_SERVICE_DISCOVERY=alb make deploy-dev
+# HTTPS certificate for the internal ALB (ALB mode only). Default: AWS Private CA
+# with the internal zone <prefix>-<env>.internal. For a public ACM certificate
+# instead, name a sub-domain delegated to a Route 53 public hosted zone:
+#   SCL_SERVICE_CERT=acm-public SCL_SERVICE_DOMAIN=coa-poc.example.com SCL_PUBLIC_ZONE_ID=Z0123... make deploy-dev
+# Or a certificate already imported into ACM (e.g. the client's own) covering
+# *.<SCL_SERVICE_DOMAIN>, given by its ARN:
+#   SCL_SERVICE_CERT=imported SCL_SERVICE_DOMAIN=coa.example.com SCL_SERVICE_CERT_ARN=arn:aws:acm:... make deploy-dev
 CONTEXT="--context env=$ENV"
 [ -n "${SCL_PREFIX:-}" ]        && CONTEXT="$CONTEXT --context resource_prefix=$SCL_PREFIX"
 [ -n "${SCL_PROJECT_TAG:-}" ]   && CONTEXT="$CONTEXT --context project_tag=$SCL_PROJECT_TAG"
@@ -52,6 +62,11 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES:-}" ] && CONTEXT="$CONTEXT --context serve_nl2sql_graph_expand_max_tables=$SCL_NL2SQL_GRAPH_EXPAND_MAX_TABLES"
 [ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="$CONTEXT --context smus_admin_principal_arns=$SCL_SMUS_ADMIN_ARNS"
 [ -n "${SCL_METADATA_STORE:-}" ] && CONTEXT="$CONTEXT --context metadata_store=$SCL_METADATA_STORE"
+[ -n "${SCL_SERVICE_DISCOVERY:-}" ] && CONTEXT="$CONTEXT --context service_discovery=$SCL_SERVICE_DISCOVERY"
+[ -n "${SCL_SERVICE_CERT:-}" ] && CONTEXT="$CONTEXT --context service_cert=$SCL_SERVICE_CERT"
+[ -n "${SCL_SERVICE_DOMAIN:-}" ] && CONTEXT="$CONTEXT --context service_domain=$SCL_SERVICE_DOMAIN"
+[ -n "${SCL_PUBLIC_ZONE_ID:-}" ] && CONTEXT="$CONTEXT --context public_zone_id=$SCL_PUBLIC_ZONE_ID"
+[ -n "${SCL_SERVICE_CERT_ARN:-}" ] && CONTEXT="$CONTEXT --context service_cert_arn=$SCL_SERVICE_CERT_ARN"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
 # NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when

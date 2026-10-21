@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Pick the metadata store backend from the environment.
 
 The CDK flag ``metadata_store=dynamodb`` sets ``METADATA_STORE_BACKEND=dynamodb``

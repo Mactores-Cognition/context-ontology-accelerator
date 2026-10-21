@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Scan pipeline in DynamoDB mode (METADATA_STORE_BACKEND=dynamodb).
 
 SourcesStack sets METADATA_STORE_BACKEND / METADATA_STORE_TABLE on the

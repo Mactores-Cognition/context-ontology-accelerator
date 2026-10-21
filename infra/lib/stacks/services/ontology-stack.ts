@@ -5,6 +5,7 @@ import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
+import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
@@ -22,9 +23,14 @@ import { SCLStack } from "../../constructs/scl-stack";
 import { SclMonitoring } from "../../constructs";
 import { Paths } from "../../paths";
 import {
+  isAlbServiceDiscovery,
   isDynamoDbMetadataStore,
   METADATA_STORE_DYNAMODB,
   resolveContext,
+  SERVICE_CA_CERT_PARAM_ENV,
+  SERVICE_CERT_ARN_ENV,
+  serviceCaCertParamName,
+  serviceCertArn,
 } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
@@ -34,6 +40,12 @@ import {
   DEFAULT_BEDROCK_INDUCTION_MODEL_ID,
 } from "../../constants";
 import { TABLE_NAMES } from "@coa/shared";
+
+/**
+ * Container port where ontology-engine serves HTTPS for the internal ALB
+ * (`service_discovery=alb`); the regular port stays HTTP on localhost.
+ */
+export const ONTOLOGY_ENGINE_TLS_PORT = 8443;
 
 export interface OntologyStackProps extends cdk.StackProps {
   readonly network: NetworkStack;
@@ -58,8 +70,11 @@ export interface OntologyStackProps extends cdk.StackProps {
   readonly memoryLimitMiB?: number;
   readonly containerPort?: number;
   readonly desiredCount?: number;
-  /** Shared Cloud Map private DNS namespace for service discovery. */
-  readonly serviceNamespace: servicediscovery.IPrivateDnsNamespace;
+  /**
+   * Shared Cloud Map private DNS namespace for service discovery. Required
+   * unless `service_discovery=alb`, where `network.servicesAlb` is used.
+   */
+  readonly serviceNamespace?: servicediscovery.IPrivateDnsNamespace;
   /**
    * Bedrock model IDs, resolved from the SSM deploy config (#94). Omitted →
    * the shared defaults apply, so a deployment that configures nothing behaves
@@ -147,7 +162,25 @@ export class OntologyStack extends SCLStack {
     this.containerPort = props.containerPort ?? 8001;
     const desiredCount = props.desiredCount ?? 1;
 
+    // Cloud Map (default) or the internal ALB (service_discovery=alb).
+    const albMode = isAlbServiceDiscovery(this.node);
     const namespace = props.serviceNamespace;
+    const servicesAlb = props.network.servicesAlb;
+    if (albMode ? !servicesAlb : !namespace) {
+      throw new Error(
+        albMode
+          ? "OntologyStack with service_discovery=alb requires network.servicesAlb."
+          : "OntologyStack requires serviceNamespace (Cloud Map).",
+      );
+    }
+    // ALB mode is HTTPS-only: callers use the name in the private zone, which
+    // the ALB certificate covers; the ALB reaches the container's TLS port.
+    const serviceEndpoint = albMode
+      ? `https://ontology-engine.${props.network.serviceTls!.domainName}:${this.containerPort}`
+      : `http://ontology-engine.${namespace!.namespaceName}:${this.containerPort}`;
+    const tlsPort = ONTOLOGY_ENGINE_TLS_PORT;
+    const caCertParam = serviceCaCertParamName(this.node);
+    const certArn = serviceCertArn(this.node);
 
     // ── Cross-stack table names via SSM ──────────────────────────────
     // We avoid direct construct prop refs (which create CloudFormation
@@ -298,12 +331,18 @@ export class OntologyStack extends SCLStack {
         SOURCES_API_FN_NAME: `${this.prefixed("sources-api")}`,
         INDUCE_OUTPUT_DIR: "/tmp/induce",
         PORT: String(this.containerPort),
+        // ALB mode: also serve HTTPS on this port for the ALB (serve_tls.py);
+        // PORT then stays HTTP on 127.0.0.1 for the engine's own calls.
+        ...(albMode && { SERVICE_TLS_PORT: String(tlsPort) }),
       },
       portMappings: [
         {
           containerPort: this.containerPort,
           protocol: ecs.Protocol.TCP,
         },
+        ...(albMode
+          ? [{ containerPort: tlsPort, protocol: ecs.Protocol.TCP }]
+          : []),
       ],
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "ontology-engine",
@@ -535,12 +574,17 @@ export class OntologyStack extends SCLStack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [ecsSecurityGroup],
       assignPublicIp: false,
-      cloudMapOptions: {
-        cloudMapNamespace: namespace,
-        name: "ontology-engine",
-        dnsRecordType: servicediscovery.DnsRecordType.A,
-        dnsTtl: cdk.Duration.seconds(10),
-      },
+      ...(albMode
+        ? // The container health check allows 90 s to start (startPeriod).
+          { healthCheckGracePeriod: cdk.Duration.seconds(120) }
+        : {
+            cloudMapOptions: {
+              cloudMapNamespace: namespace,
+              name: "ontology-engine",
+              dnsRecordType: servicediscovery.DnsRecordType.A,
+              dnsTtl: cdk.Duration.seconds(10),
+            },
+          }),
       circuitBreaker: { rollback: true },
       minHealthyPercent: 100,
       maxHealthyPercent: 200,
@@ -552,11 +596,53 @@ export class OntologyStack extends SCLStack {
     // the deployment circuit breaker.
     this.service.node.addDependency(ossDataAccessPolicy);
 
-    ecsSecurityGroup.addIngressRule(
-      props.network.lambdaSecurityGroup,
-      ec2.Port.tcp(this.containerPort),
-      "Allow ontology-engine API from api-proxy Lambda",
-    );
+    if (albMode) {
+      // Internal ALB, HTTPS on both legs: listener on the container port with
+      // the service certificate, ontology-engine as the default action (no
+      // listener rule needed), forwarding over HTTPS to the container's TLS
+      // port (self-signed; the ALB does not validate target certificates).
+      // Registering the target adds the ALB -> task security-group rules.
+      const targetGroup = new elbv2.ApplicationTargetGroup(
+        this,
+        "OntologyEngineTargetGroup",
+        {
+          vpc,
+          port: tlsPort,
+          protocol: elbv2.ApplicationProtocol.HTTPS,
+          targetType: elbv2.TargetType.IP,
+          healthCheck: {
+            path: "/health",
+            healthyHttpCodes: "200",
+            protocol: elbv2.Protocol.HTTPS,
+          },
+          deregistrationDelay: cdk.Duration.seconds(30),
+        },
+      );
+      new elbv2.ApplicationListener(this, "OntologyEngineListener", {
+        loadBalancer: servicesAlb!,
+        port: this.containerPort,
+        protocol: elbv2.ApplicationProtocol.HTTPS,
+        certificates: [
+          elbv2.ListenerCertificate.fromCertificateManager(
+            props.network.serviceTls!.certificate,
+          ),
+        ],
+        open: false,
+        defaultTargetGroups: [targetGroup],
+      });
+      targetGroup.addTarget(
+        this.service.loadBalancerTarget({
+          containerName: this.prefixed("ontology-engine"),
+          containerPort: tlsPort,
+        }),
+      );
+    } else {
+      ecsSecurityGroup.addIngressRule(
+        props.network.lambdaSecurityGroup,
+        ec2.Port.tcp(this.containerPort),
+        "Allow ontology-engine API from api-proxy Lambda",
+      );
+    }
 
     // ================================================================
     // OE monitoring (cdk-monitoring-constructs)
@@ -1040,16 +1126,18 @@ export class OntologyStack extends SCLStack {
     // exported ARN and CFN would refuse to drop it (deployed ontology stack
     // still imports it). Real consumers can also discover the ARN here
     // instead of creating new cross-stack exports.
-    new ssm.StringParameter(this, "SsmServiceNamespaceArn", {
-      parameterName: `${ssmPrefix}/ontology-engine/service-namespace-arn`,
-      stringValue: namespace.namespaceArn,
-      description:
-        "Cloud Map private DNS namespace ARN (consumed by ontology services)",
-    });
+    if (namespace) {
+      new ssm.StringParameter(this, "SsmServiceNamespaceArn", {
+        parameterName: `${ssmPrefix}/ontology-engine/service-namespace-arn`,
+        stringValue: namespace.namespaceArn,
+        description:
+          "Cloud Map private DNS namespace ARN (consumed by ontology services)",
+      });
+    }
 
     new ssm.StringParameter(this, "SsmOntologyEndpoint", {
       parameterName: `${ssmPrefix}/ontology-engine/endpoint`,
-      stringValue: `http://ontology-engine.${namespace.namespaceName}:${this.containerPort}`,
+      stringValue: serviceEndpoint,
     });
 
     new ssm.StringParameter(this, "SsmOntologyTableName", {
@@ -1092,13 +1180,35 @@ export class OntologyStack extends SCLStack {
         // name ``ontology-engine`` only resolves from inside ECS tasks
         // (which inject the namespace as a search domain); Lambda's
         // resolver requires the fully-qualified name.
-        ONTOLOGY_ENGINE_ENDPOINT: `http://ontology-engine.${namespace.namespaceName}:${this.containerPort}`,
+        ONTOLOGY_ENGINE_ENDPOINT: serviceEndpoint,
+        // Private CA root for verifying the ALB certificate (ALB mode only).
+        ...(caCertParam && { [SERVICE_CA_CERT_PARAM_ENV]: caCertParam }),
+        // Or the imported certificate, whose CA chain is read from ACM.
+        ...(certArn && { [SERVICE_CERT_ARN_ENV]: certArn }),
         SOURCES_TABLE: sourcesTableName,
         NEPTUNE_ENDPOINT: props.neptuneClusterEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
         ALLOWED_ORIGIN: props.allowedOrigin,
       },
     });
+    if (caCertParam) {
+      apiProxyFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${caCertParam}`,
+          ],
+        }),
+      );
+    }
+    if (certArn) {
+      apiProxyFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["acm:GetCertificate"],
+          resources: [certArn],
+        }),
+      );
+    }
     apiProxyFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["dynamodb:DescribeTable"],
@@ -1127,8 +1237,10 @@ export class OntologyStack extends SCLStack {
     // Outputs
     // ================================================================
     new cdk.CfnOutput(this, "OntologyServiceEndpoint", {
-      value: `http://ontology-engine.${namespace.namespaceName}:${this.containerPort}`,
-      description: "Ontology Engine internal endpoint via Cloud Map DNS",
+      value: serviceEndpoint,
+      description: albMode
+        ? "Ontology Engine internal endpoint via the internal services ALB"
+        : "Ontology Engine internal endpoint via Cloud Map DNS",
     });
 
     new cdk.CfnOutput(this, "OntologyTableName", {

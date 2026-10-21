@@ -944,3 +944,97 @@ describe("ServeStack - parameter read is deliberately broad", () => {
     ).toBe(true);
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): the runtime keeps
+// VKG_ENDPOINT as is and sends each namespace as a header instead of rewriting
+// the hostname, so it must know the mode.
+describe("ServeStack - service discovery mode", () => {
+  const envOf = (template: Template): Record<string, unknown> => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    return Object.values(runtimes)[0].Properties.EnvironmentVariables;
+  };
+
+  it("ALB mode: tells the runtime to route VKG calls by header", () => {
+    expect(envOf(createStack({ service_discovery: "alb" }))).toMatchObject({
+      SERVICE_DISCOVERY_BACKEND: "alb",
+    });
+  });
+
+  it("default mode: omits the variable", () => {
+    expect(envOf(createStack())).not.toHaveProperty("SERVICE_DISCOVERY_BACKEND");
+  });
+});
+
+// HTTPS for the internal ALB: the runtime trusts the private CA through the
+// CA root in SSM (it already reads the whole /<prefix> tree, see above).
+describe("ServeStack - private CA for the internal ALB", () => {
+  const envOf = (template: Template): Record<string, unknown> => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    return Object.values(runtimes)[0].Properties.EnvironmentVariables;
+  };
+
+  it("ALB mode (private-ca): passes the CA parameter name", () => {
+    expect(envOf(createStack({ service_discovery: "alb" }))).toMatchObject({
+      SERVICE_CA_CERT_PARAM: "/coa/services/ca-cert",
+    });
+  });
+
+  it("ALB mode with a public certificate: no CA parameter", () => {
+    expect(
+      envOf(
+        createStack({
+          service_discovery: "alb",
+          service_cert: "acm-public",
+          service_domain: "coa-poc.example.com",
+          public_zone_id: "Z0123456789ABC",
+        }),
+      ),
+    ).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+  });
+
+  it("default mode: no CA parameter", () => {
+    expect(envOf(createStack())).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+  });
+});
+
+// The client's own certificate (service_cert=imported): the runtime trusts it
+// through the CA chain kept in ACM with the certificate.
+describe("ServeStack - client certificate for the internal ALB", () => {
+  const CERT_ARN =
+    "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+  const IMPORTED = {
+    service_discovery: "alb",
+    service_cert: "imported",
+    service_cert_arn: CERT_ARN,
+    service_domain: "coa.example.com",
+  };
+  const envOf = (template: Template): Record<string, unknown> => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    return Object.values(runtimes)[0].Properties.EnvironmentVariables;
+  };
+
+  it("imported: passes the certificate ARN, not a CA parameter", () => {
+    const env = envOf(createStack(IMPORTED));
+    expect(env).toMatchObject({ SERVICE_CERT_ARN: CERT_ARN });
+    expect(env).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+  });
+
+  it("imported: the runtime may read that certificate from ACM", () => {
+    const statements = Object.values(
+      createStack(IMPORTED).findResources("AWS::IAM::Policy"),
+    ).flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (s: any) =>
+          [s.Action].flat().includes("acm:GetCertificate") &&
+          JSON.stringify(s.Resource) === JSON.stringify(CERT_ARN),
+      ),
+    ).toBe(true);
+  });
+
+  it("private-ca (default ALB mode): no certificate ARN", () => {
+    expect(envOf(createStack({ service_discovery: "alb" }))).not.toHaveProperty(
+      "SERVICE_CERT_ARN",
+    );
+  });
+});

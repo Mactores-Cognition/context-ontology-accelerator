@@ -469,3 +469,146 @@ describe("VkgStack", () => {
     });
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): VKG gets a listener
+// whose per-namespace rules the reload Lambda adds at runtime (header
+// X-Coa-Namespace). Unknown or missing namespaces get a fixed 404.
+describe("VkgStack in ALB mode (service_discovery=alb)", () => {
+  let template: Template;
+  beforeAll(() => {
+    template = renderVkgWithContext({ service_discovery: "alb" });
+  });
+
+  const reloadEnv = (t: Template): Record<string, unknown> => {
+    const fns = Object.values(t.findResources("AWS::Lambda::Function")) as any[];
+    const reload = fns.find((f) =>
+      String(f.Properties.FunctionName ?? "").endsWith("vkg-reload"),
+    );
+    expect(reload).toBeDefined();
+    return reload.Properties.Environment.Variables;
+  };
+  const actions = (t: Template): string[] =>
+    Object.values(t.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+
+  test("ALB mode with the client's certificate (imported): the 8080 listener uses it", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    renderVkgWithContext({
+      service_discovery: "alb",
+      service_cert: "imported",
+      service_cert_arn: certArn,
+      service_domain: "coa.example.com",
+    }).hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8080,
+      Protocol: "HTTPS",
+      Certificates: [{ CertificateArn: certArn }],
+    });
+  });
+
+  test("ALB mode: HTTPS listener on 8080 answers unknown namespaces with a fixed 404", () => {
+    template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8080,
+      Protocol: "HTTPS",
+      Certificates: [Match.objectLike({ CertificateArn: Match.anyValue() })],
+      DefaultActions: [
+        Match.objectLike({
+          Type: "fixed-response",
+          FixedResponseConfig: Match.objectLike({ StatusCode: "404" }),
+        }),
+      ],
+    });
+  });
+
+  test("ALB mode: reload Lambda gets the ALB settings instead of the Cloud Map namespace", () => {
+    const env = reloadEnv(template);
+    expect(env.SERVICE_DISCOVERY_BACKEND).toBe("alb");
+    expect(env.VKG_LISTENER_ARN).toBeDefined();
+    expect(env.VPC_ID).toBeDefined();
+    expect(env).not.toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+  });
+
+  test("ALB mode: reload Lambda may manage target groups and rules, and has no servicediscovery actions", () => {
+    const all = actions(template);
+    for (const action of [
+      "elasticloadbalancing:CreateTargetGroup",
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:CreateRule",
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:DescribeRules",
+      "elasticloadbalancing:DescribeTargetGroups",
+    ]) {
+      expect(all).toContain(action);
+    }
+    expect(all.filter((a) => a.startsWith("servicediscovery:"))).toEqual([]);
+  });
+
+  test("ALB mode: endpoint SSM parameter uses the HTTPS service name and the listener ARN is published", () => {
+    const [endpoint] = Object.values(
+      template.findResources("AWS::SSM::Parameter", {
+        Properties: { Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/endpoint` },
+      }),
+    ) as any[];
+    expect(endpoint.Properties.Value).toBe(`https://vkg.${PREFIX}.internal:8080`);
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/listener-arn`,
+    });
+  });
+
+  test("ALB mode: no direct VPC-wide 8080 ingress to the ECS tasks (traffic comes through the ALB)", () => {
+    // CDK writes a rule on the shared ECS SG into the SG's own stack (network),
+    // so build both and inspect the network template.
+    const ecsSgRulesFromVpc = (context: Record<string, unknown>): any[] => {
+      const app = new cdk.App({ context: { ...TEST_CONTEXT, ...context } });
+      const network = new NetworkStack(app, "SgNetwork");
+      const bucketStack = new cdk.Stack(app, "SgBucketStack");
+      new VkgStack(app, "SgVkg", {
+        network,
+        serviceNamespace: network.serviceNamespace,
+        ontologyBucket: new s3.Bucket(bucketStack, "OntologyBucket"),
+      });
+      const net = Template.fromStack(network);
+      const sgs = net.findResources("AWS::EC2::SecurityGroup");
+      const ecsSgId = Object.keys(sgs).find((k) =>
+        (sgs[k].Properties.GroupDescription as string).startsWith("ECS Fargate"),
+      )!;
+      const inline = (sgs[ecsSgId].Properties.SecurityGroupIngress ?? []) as any[];
+      return inline.filter((r) => r.FromPort === 8080 && r.CidrIp !== undefined);
+    };
+    expect(ecsSgRulesFromVpc({})).toHaveLength(1); // default mode: as today
+    expect(ecsSgRulesFromVpc({ service_discovery: "alb" })).toHaveLength(0);
+  });
+
+  test("default mode: no listener, and the reload Lambda keeps the Cloud Map namespace", () => {
+    const def = renderVkgWithContext({});
+    def.resourceCountIs("AWS::ElasticLoadBalancingV2::Listener", 0);
+    const env = reloadEnv(def);
+    expect(env).toHaveProperty("CLOUD_MAP_NAMESPACE_ID");
+    expect(env).not.toHaveProperty("SERVICE_DISCOVERY_BACKEND");
+  });
+});
+
+// HTTPS for the internal ALB: the VKG container template serves HTTPS
+// (SERVICE_TLS=1) and its health check uses it. Per-namespace task
+// definitions come from the reload Lambda (infra/test/lambdas).
+describe("VkgStack HTTPS for the internal ALB", () => {
+  const ontop = (t: Template): any => {
+    const [td] = Object.values(t.findResources("AWS::ECS::TaskDefinition")) as any[];
+    return td.Properties.ContainerDefinitions[0];
+  };
+
+  test("ALB mode: container template turns TLS on and health-checks over HTTPS", () => {
+    const c = ontop(renderVkgWithContext({ service_discovery: "alb" }));
+    expect(c.Environment).toEqual(
+      expect.arrayContaining([{ Name: "SERVICE_TLS", Value: "1" }]),
+    );
+    expect(c.HealthCheck.Command.join(" ")).toContain("https://localhost:8080/health");
+  });
+
+  test("default mode: no SERVICE_TLS and the HTTP health check as before", () => {
+    const c = ontop(renderVkgWithContext({}));
+    expect(c.Environment.map((e: any) => e.Name)).not.toContain("SERVICE_TLS");
+    expect(c.HealthCheck.Command.join(" ")).toContain("http://localhost:8080/health");
+  });
+});

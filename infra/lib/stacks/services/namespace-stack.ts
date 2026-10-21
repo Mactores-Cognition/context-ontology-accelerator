@@ -20,6 +20,10 @@ import {
   METADATA_STORE_DYNAMODB,
   NO_DATAZONE_DOMAIN,
   resolveContext,
+  SERVICE_CA_CERT_PARAM_ENV,
+  SERVICE_CERT_ARN_ENV,
+  serviceCaCertParamName,
+  serviceCertArn,
 } from "../../context";
 import { bundlePython } from "../../utils/python-bundling";
 import { NamespaceDeletionPipeline } from "./namespace-deletion-pipeline";
@@ -40,6 +44,11 @@ export interface NamespaceStackProps extends cdk.StackProps {
   readonly vkgClusterArn?: string;
   /** Cloud Map namespace ID (for teardown on namespace delete). */
   readonly cloudMapNamespaceId?: string;
+  /**
+   * VKG listener ARN on the internal services ALB (for teardown on namespace
+   * delete). Used instead of cloudMapNamespaceId with `service_discovery=alb`.
+   */
+  readonly vkgListenerArn?: string;
   /** Ontology S3 bucket name (for artifact cleanup on namespace delete). */
   readonly ontologyBucketName?: string;
   /**
@@ -204,6 +213,15 @@ export class NamespaceStack extends SCLStack {
           ...(props.ontologyEngineEndpoint && {
             ONTOLOGY_ENGINE_ENDPOINT: props.ontologyEngineEndpoint,
           }),
+          // Private CA root for verifying ontology-engine's ALB certificate
+          // (internal ALB with AWS Private CA only).
+          ...(serviceCaCertParamName(this.node) && {
+            [SERVICE_CA_CERT_PARAM_ENV]: serviceCaCertParamName(this.node),
+          }),
+          // Or the imported certificate, whose CA chain is read from ACM.
+          ...(serviceCertArn(this.node) && {
+            [SERVICE_CERT_ARN_ENV]: serviceCertArn(this.node),
+          }),
           // Lets get_handler resolve VKG service health from ECS
           // (resolve_vkg_health). Absent this var the resolver short-circuits
           // to UNKNOWN for every namespace.
@@ -226,7 +244,29 @@ export class NamespaceStack extends SCLStack {
     //   failed jobs no longer block deletion).
     // Ontology induction jobs are checked via an HTTP call to the
     // ontology-engine (see delete_handler._check_active_induction_jobs) —
-    // no DynamoDB grant needed for that check.
+    // no DynamoDB grant needed for that check. Over HTTPS with a private CA
+    // the call reads the CA root from SSM; with an imported certificate it
+    // reads the CA chain from ACM.
+    const caCertParam = serviceCaCertParamName(this.node);
+    if (caCertParam) {
+      namespaceApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${caCertParam}`,
+          ],
+        }),
+      );
+    }
+    const certArn = serviceCertArn(this.node);
+    if (certArn) {
+      namespaceApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["acm:GetCertificate"],
+          resources: [certArn],
+        }),
+      );
+    }
     namespaceApiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["dynamodb:Query"],
@@ -357,6 +397,7 @@ export class NamespaceStack extends SCLStack {
           : undefined,
         vkgClusterArn: props.vkgClusterArn,
         cloudMapNamespaceId: props.cloudMapNamespaceId,
+        vkgListenerArn: props.vkgListenerArn,
         ontologyBucketName: props.ontologyBucketName,
         ontologyEngineEndpoint: props.ontologyEngineEndpoint,
         // For dropping the namespace's GraphRAG doc-KG indexes on teardown.

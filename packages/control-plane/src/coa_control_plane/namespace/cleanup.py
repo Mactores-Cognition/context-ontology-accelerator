@@ -15,6 +15,7 @@ step definitions) rather than inside a single Lambda invocation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -29,6 +30,7 @@ from coa_common.constants import graphrag_index_names
 from coa_common.dao import DynamoDBDAO, QueryParams
 from coa_common.metadata_store import get_metadata_store, is_dynamodb_backend
 from coa_common.opensearch import AossVectorClient
+from coa_common.service_tls import ssl_context
 
 logger = structlog.get_logger(__name__)
 
@@ -245,13 +247,35 @@ def _paginated_query_all(dao: DynamoDBDAO, params: QueryParams) -> list[dict[str
 
 # ── VKG Teardown ───────────────────────────────────────────────────────────
 
+# Internal ALB mode (SERVICE_DISCOVERY_BACKEND=alb): the VKG reload Lambda
+# (infra/lambda/vkg-reload/index.py) routes each namespace through a listener
+# rule on this header and a target group named by vkg_target_group_name. Both
+# must stay in step with the Lambda.
+_ALB_BACKEND = "alb"
+VKG_NAMESPACE_HEADER = "X-Coa-Namespace"
+
+
+def vkg_target_group_name(prefix: str, namespace_id: str) -> str:
+    """Return the namespace's VKG target group name (as the reload Lambda builds it).
+
+    Args:
+        prefix: Resource prefix without a trailing dash (e.g. ``coa-dev``).
+        namespace_id: Namespace id.
+
+    Returns:
+        ``vkg-`` plus 28 hex characters (the 32-character target group name limit).
+    """
+    return "vkg-" + hashlib.sha256(f"{prefix}:{namespace_id}".encode()).hexdigest()[:28]
+
 
 def teardown_vkg_service(namespace_id: str) -> None:
-    """Delete VKG ECS service + Cloud Map entry for a namespace. Best-effort.
+    """Delete VKG ECS service + its Cloud Map entry or ALB route for a namespace. Best-effort.
 
     Steps:
     1. Delete ECS service (force=True stops running tasks)
-    2. Deregister Cloud Map instances + delete Cloud Map service
+    2. Cloud Map (default): deregister instances + delete the Cloud Map service.
+       Internal ALB (SERVICE_DISCOVERY_BACKEND=alb): delete the namespace's
+       listener rule, then its target group.
 
     Logs errors but does not raise — namespace deletion continues on failure.
     """
@@ -278,6 +302,10 @@ def teardown_vkg_service(namespace_id: str) -> None:
             service_name=service_name,
             error_type=type(e).__name__,
         )
+
+    if os.environ.get("SERVICE_DISCOVERY_BACKEND", "") == _ALB_BACKEND:
+        _teardown_vkg_alb_route(namespace_id, prefix, region)
+        return
 
     # Clean up Cloud Map service discovery entry
     if not cloud_map_ns_id:
@@ -313,6 +341,83 @@ def teardown_vkg_service(namespace_id: str) -> None:
             namespace_id=namespace_id,
             error_type=type(e).__name__,
         )
+
+
+def _teardown_vkg_alb_route(namespace_id: str, prefix: str, region: str) -> None:
+    """Delete the namespace's VKG listener rule, then its target group. Best-effort.
+
+    The rule is found by its X-Coa-Namespace header value; if there is none (a
+    provision that failed between the two steps), the target group is looked up
+    by name. A target group stays in use until ECS deregisters the deleted
+    service's tasks, so its delete is retried.
+    """
+    listener_arn = os.environ.get("VKG_LISTENER_ARN", "")
+    elbv2 = boto3.client("elbv2", region_name=region, config=async_boto_config())
+    try:
+        target_group_arn = None
+        if listener_arn:
+            rule = _vkg_namespace_rule(elbv2, listener_arn, namespace_id)
+            if rule is not None:
+                target_group_arn = _forward_target_group(rule)
+                elbv2.delete_rule(RuleArn=rule["RuleArn"])
+                logger.info("vkg_alb_rule_deleted", namespace_id=namespace_id)
+        if target_group_arn is None:
+            try:
+                groups = elbv2.describe_target_groups(Names=[vkg_target_group_name(prefix, namespace_id)])
+            except elbv2.exceptions.TargetGroupNotFoundException:
+                logger.info("vkg_alb_route_not_found", namespace_id=namespace_id)
+                return
+            target_group_arn = groups["TargetGroups"][0]["TargetGroupArn"]
+        for attempt in range(4):
+            try:
+                elbv2.delete_target_group(TargetGroupArn=target_group_arn)
+                break
+            except elbv2.exceptions.ResourceInUseException:
+                if attempt == 3:
+                    raise
+                time.sleep(2**attempt)
+        logger.info("vkg_alb_target_group_deleted", namespace_id=namespace_id)
+    except Exception as e:
+        logger.error(
+            "vkg_alb_route_delete_failed",
+            namespace_id=namespace_id,
+            error_type=type(e).__name__,
+        )
+
+
+def _vkg_namespace_rule(elbv2: Any, listener_arn: str, namespace_id: str) -> dict[str, Any] | None:
+    """Return the listener rule matching the namespace's X-Coa-Namespace header, or None."""
+    marker = None
+    while True:
+        kwargs: dict[str, Any] = {"ListenerArn": listener_arn}
+        if marker:
+            kwargs["Marker"] = marker
+        page = elbv2.describe_rules(**kwargs)
+        for rule in page.get("Rules", []):
+            for condition in rule.get("Conditions", []):
+                config = condition.get("HttpHeaderConfig") or {}
+                if (
+                    condition.get("Field") == "http-header"
+                    and config.get("HttpHeaderName", "").lower() == VKG_NAMESPACE_HEADER.lower()
+                    and namespace_id in config.get("Values", [])
+                ):
+                    return dict(rule)
+        marker = page.get("NextMarker")
+        if not marker:
+            return None
+
+
+def _forward_target_group(rule: dict[str, Any]) -> str | None:
+    """Return the target group ARN a listener rule forwards to, if any."""
+    for action in rule.get("Actions", []):
+        if action.get("Type") != "forward":
+            continue
+        if action.get("TargetGroupArn"):
+            return str(action["TargetGroupArn"])
+        groups = (action.get("ForwardConfig") or {}).get("TargetGroups") or []
+        if groups:
+            return str(groups[0]["TargetGroupArn"])
+    return None
 
 
 def delete_graphrag_indexes(namespace_id: str) -> list[str]:
@@ -392,7 +497,9 @@ def delete_all_ontologies(namespace_id: str) -> None:
     req = urllib_request.Request(url, method="DELETE")
 
     try:
-        with urllib_request.urlopen(req, timeout=120) as resp:  # noqa: S310
+        # ssl_context(): trusts the CA behind the internal ALB (private CA or imported
+        # certificate); None otherwise.
+        with urllib_request.urlopen(req, timeout=120, context=ssl_context()) as resp:  # noqa: S310
             body = json.loads(resp.read().decode("utf-8"))
             logger.info(
                 "all_ontologies_deleted",

@@ -461,3 +461,291 @@ describe("NetworkStack in DynamoDB mode (metadata_store=dynamodb)", () => {
     }
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb). Cloud Map is not
+// approved in every account, so ontology-engine and the per-namespace VKG
+// services can sit behind one internal ALB instead. Default mode is unchanged.
+describe("NetworkStack in ALB mode (service_discovery=alb)", () => {
+  const ALB_CONTEXT = { service_discovery: "alb" };
+
+  /** Security group whose GroupDescription starts with the given text. */
+  const sgLogicalId = (template: Template, description: string): string => {
+    const sgs = template.findResources("AWS::EC2::SecurityGroup");
+    const id = Object.keys(sgs).find((key) =>
+      (sgs[key].Properties.GroupDescription as string).startsWith(description),
+    );
+    expect(id).toBeDefined();
+    return id!;
+  };
+
+  it("ALB mode: creates no Cloud Map namespace", () => {
+    buildStack(ALB_CONTEXT).resourceCountIs(
+      "AWS::ServiceDiscovery::PrivateDnsNamespace",
+      0,
+    );
+  });
+
+  it("ALB mode: creates one internal ALB with a 180 s idle timeout", () => {
+    const template = buildStack(ALB_CONTEXT);
+    template.resourceCountIs("AWS::ElasticLoadBalancingV2::LoadBalancer", 1);
+    template.hasResourceProperties(
+      "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      {
+        Scheme: "internal",
+        Type: "application",
+        LoadBalancerAttributes: Match.arrayWith([
+          { Key: "idle_timeout.timeout_seconds", Value: "180" },
+        ]),
+      },
+    );
+  });
+
+  it("ALB mode: ALB security group takes 8001 from the Lambda SG and 8080 from the VPC only", () => {
+    const template = buildStack(ALB_CONTEXT);
+    const albSg = template.findResources("AWS::EC2::SecurityGroup")[
+      sgLogicalId(template, "Internal services ALB")
+    ];
+    const inline = albSg.Properties.SecurityGroupIngress ?? [];
+    const standalone = Object.values(
+      template.findResources("AWS::EC2::SecurityGroupIngress"),
+    )
+      .map((r: any) => r.Properties)
+      .filter(
+        (p: any) =>
+          JSON.stringify(p.GroupId).includes(
+            sgLogicalId(template, "Internal services ALB"),
+          ),
+      );
+    const ingress = [...inline, ...standalone];
+    expect(ingress.some((r: any) => r.CidrIp === "0.0.0.0/0")).toBe(false);
+    expect(
+      ingress.some(
+        (r: any) =>
+          r.FromPort === 8001 &&
+          JSON.stringify(r.SourceSecurityGroupId).includes(
+            sgLogicalId(template, "Lambda functions"),
+          ),
+      ),
+    ).toBe(true);
+    expect(
+      ingress.some((r: any) => r.FromPort === 8080 && r.CidrIp !== undefined),
+    ).toBe(true);
+  });
+
+  it("ALB mode: ECS tasks accept 8080 from the ALB, and Lambdas reach the ALB on 8001", () => {
+    const template = buildStack(ALB_CONTEXT);
+    const albId = sgLogicalId(template, "Internal services ALB");
+    template.hasResourceProperties("AWS::EC2::SecurityGroupIngress", {
+      FromPort: 8080,
+      ToPort: 8080,
+      GroupId: { "Fn::GetAtt": [sgLogicalId(template, "ECS Fargate"), "GroupId"] },
+      SourceSecurityGroupId: { "Fn::GetAtt": [albId, "GroupId"] },
+    });
+    const lambdaToAlb = [
+      ...lambdaEgress(template),
+      ...Object.values(template.findResources("AWS::EC2::SecurityGroupEgress")).map(
+        (r: any) => r.Properties,
+      ),
+    ].filter(
+      (r: any) =>
+        r.FromPort === 8001 &&
+        JSON.stringify(r.DestinationSecurityGroupId ?? "").includes(albId),
+    );
+    expect(lambdaToAlb.length).toBe(1);
+  });
+
+  it("default mode: creates no ALB", () => {
+    buildStack().resourceCountIs("AWS::ElasticLoadBalancingV2::LoadBalancer", 0);
+  });
+});
+
+// HTTPS for the internal ALB (replace-cloud-map-notes.txt sections 14-15):
+// services get names in a Route 53 private zone and a certificate for them,
+// from AWS Private CA (service_cert=private-ca, the default) or a public ACM
+// certificate (service_cert=acm-public). Default (Cloud Map) mode is unchanged.
+describe("NetworkStack HTTPS for the internal ALB", () => {
+  const ALB = { service_discovery: "alb" };
+  const PUBLIC = {
+    service_discovery: "alb",
+    service_cert: "acm-public",
+    service_domain: "coa-poc.example.com",
+    public_zone_id: "Z0123456789ABC",
+  };
+
+  it("ALB mode: private hosted zone <prefix>-<env>.internal attached to the VPC", () => {
+    buildStack(ALB).hasResourceProperties("AWS::Route53::HostedZone", {
+      Name: "coa-dev.internal.",
+      VPCs: Match.arrayWith([Match.objectLike({ VPCId: Match.anyValue() })]),
+    });
+  });
+
+  it("ALB mode: ontology-engine and vkg records alias the internal ALB", () => {
+    const template = buildStack(ALB);
+    for (const name of ["ontology-engine.coa-dev.internal.", "vkg.coa-dev.internal."]) {
+      template.hasResourceProperties("AWS::Route53::RecordSet", {
+        Name: name,
+        Type: "A",
+        AliasTarget: Match.objectLike({ DNSName: Match.anyValue() }),
+      });
+    }
+  });
+
+  it("ALB mode (private-ca, default): general-purpose root CA, activated, ACM may use it", () => {
+    const template = buildStack(ALB);
+    template.hasResourceProperties("AWS::ACMPCA::CertificateAuthority", {
+      Type: "ROOT",
+      UsageMode: "GENERAL_PURPOSE",
+    });
+    template.resourceCountIs("AWS::ACMPCA::Certificate", 1);
+    template.hasResourceProperties("AWS::ACMPCA::CertificateAuthorityActivation", {
+      Status: "ACTIVE",
+    });
+    template.hasResourceProperties("AWS::ACMPCA::Permission", {
+      Principal: "acm.amazonaws.com",
+      Actions: Match.arrayWith(["IssueCertificate", "GetCertificate", "ListPermissions"]),
+    });
+  });
+
+  it("ALB mode (private-ca): root CA certificate template ARN uses the stack partition (GovCloud)", () => {
+    const [cert] = Object.values(
+      buildStack(ALB).findResources("AWS::ACMPCA::Certificate"),
+    ) as any[];
+    const arn = JSON.stringify(cert.Properties.TemplateArn);
+    expect(arn).toContain("AWS::Partition");
+    expect(arn).toContain("template/RootCACertificate/V1");
+  });
+
+  it("ALB mode (private-ca): ACM private certificate for *.<zone>, issued by the CA", () => {
+    buildStack(ALB).hasResourceProperties("AWS::CertificateManager::Certificate", {
+      DomainName: "*.coa-dev.internal",
+      CertificateAuthorityArn: Match.anyValue(),
+    });
+  });
+
+  it("ALB mode (private-ca): CA root certificate published to SSM for the callers", () => {
+    buildStack(ALB).hasResourceProperties("AWS::SSM::Parameter", {
+      Name: "/coa/services/ca-cert",
+    });
+  });
+
+  it("service_cert=acm-public: DNS-validated public certificate, no Private CA, no CA parameter", () => {
+    const template = buildStack(PUBLIC);
+    template.hasResourceProperties("AWS::CertificateManager::Certificate", {
+      DomainName: "*.coa-poc.example.com",
+      ValidationMethod: "DNS",
+      DomainValidationOptions: Match.arrayWith([
+        Match.objectLike({ HostedZoneId: "Z0123456789ABC" }),
+      ]),
+    });
+    template.resourceCountIs("AWS::ACMPCA::CertificateAuthority", 0);
+    expect(
+      Object.keys(
+        template.findResources("AWS::SSM::Parameter", {
+          Properties: { Name: "/coa/services/ca-cert" },
+        }),
+      ),
+    ).toHaveLength(0);
+    template.hasResourceProperties("AWS::Route53::HostedZone", {
+      Name: "coa-poc.example.com.",
+    });
+  });
+
+  it("service_cert=acm-public without service_domain or public_zone_id fails synth", () => {
+    expect(() =>
+      buildStack({ service_discovery: "alb", service_cert: "acm-public" }),
+    ).toThrow(/service_domain|public_zone_id/);
+  });
+
+  it("an unknown service_cert fails synth", () => {
+    expect(() =>
+      buildStack({ service_discovery: "alb", service_cert: "self-signed" }),
+    ).toThrow(/service_cert/);
+  });
+
+  it("default mode: no hosted zone, no CA, no certificate", () => {
+    const template = buildStack();
+    template.resourceCountIs("AWS::Route53::HostedZone", 0);
+    template.resourceCountIs("AWS::ACMPCA::CertificateAuthority", 0);
+    template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+  });
+});
+
+// The client's own certificate (replace-cloud-map-notes.txt section 18): the
+// client imports it into ACM and the deploy takes its ARN
+// (service_cert=imported). It covers the services' names under the client's
+// subdomain, so no Private CA; an alarm warns before it expires because
+// imported certificates do not renew.
+describe("NetworkStack with the client's certificate (service_cert=imported)", () => {
+  const CERT_ARN =
+    "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+  const IMPORTED = {
+    service_discovery: "alb",
+    service_cert: "imported",
+    service_cert_arn: CERT_ARN,
+    service_domain: "coa.example.com",
+  };
+  const expiryAlarms = (template: Template): any[] =>
+    Object.values(
+      template.findResources("AWS::CloudWatch::Alarm", {
+        Properties: { MetricName: "DaysToExpiry" },
+      }),
+    );
+
+  it("imported: private zone and records under the client's subdomain", () => {
+    const template = buildStack(IMPORTED);
+    template.hasResourceProperties("AWS::Route53::HostedZone", {
+      Name: "coa.example.com.",
+    });
+    for (const name of ["ontology-engine.coa.example.com.", "vkg.coa.example.com."]) {
+      template.hasResourceProperties("AWS::Route53::RecordSet", { Name: name, Type: "A" });
+    }
+  });
+
+  it("imported: no Private CA, no new certificate, no CA parameter", () => {
+    const template = buildStack(IMPORTED);
+    template.resourceCountIs("AWS::ACMPCA::CertificateAuthority", 0);
+    template.resourceCountIs("AWS::CertificateManager::Certificate", 0);
+    expect(
+      Object.keys(
+        template.findResources("AWS::SSM::Parameter", {
+          Properties: { Name: "/coa/services/ca-cert" },
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("imported: alarm when the certificate has less than 30 days left", () => {
+    const [alarm] = expiryAlarms(buildStack(IMPORTED));
+    expect(alarm).toBeDefined();
+    expect(alarm.Properties).toMatchObject({
+      Namespace: "AWS/CertificateManager",
+      Threshold: 30,
+      ComparisonOperator: "LessThanThreshold",
+      Dimensions: [{ Name: "CertificateArn", Value: CERT_ARN }],
+    });
+  });
+
+  it("imported without service_cert_arn fails synth", () => {
+    expect(() =>
+      buildStack({
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_domain: "coa.example.com",
+      }),
+    ).toThrow(/service_cert_arn/);
+  });
+
+  it("imported without service_domain fails synth", () => {
+    expect(() =>
+      buildStack({
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: CERT_ARN,
+      }),
+    ).toThrow(/service_domain/);
+  });
+
+  it("private-ca (default): no expiry alarm (the CA renews its certificate)", () => {
+    expect(expiryAlarms(buildStack({ service_discovery: "alb" }))).toHaveLength(0);
+  });
+});

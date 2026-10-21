@@ -9,6 +9,10 @@ ONTOLOGY_ENGINE_ENDPOINT). Returns the ECS response as a Lambda proxy response.
 
 Environment:
     ONTOLOGY_ENGINE_ENDPOINT: Internal endpoint (e.g. http://ontology-engine:8001)
+    SERVICE_CA_CERT_PARAM: SSM parameter with the private CA root (internal ALB with
+        AWS Private CA only); see coa_common.service_tls
+    SERVICE_CERT_ARN: ACM ARN of an imported certificate on the internal ALB, whose
+        CA chain is trusted (imported certificate only); see coa_common.service_tls
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 from coa_common import resolve_region
+from coa_common.service_tls import ssl_context
 
 ENDPOINT = os.environ["ONTOLOGY_ENGINE_ENDPOINT"].rstrip("/")
 
@@ -183,7 +188,7 @@ def _handle_system_health() -> dict:
     try:
         url = f"{ENDPOINT}/readiness"
         req = urllib_request.Request(url, method="GET")
-        with urllib_request.urlopen(req, timeout=15) as resp:
+        with urllib_request.urlopen(req, timeout=15, context=ssl_context()) as resp:
             data = json.loads(resp.read())
         results["ontologyInduction"] = {
             "graphStore": data.get("graph_store", "unknown"),
@@ -281,7 +286,9 @@ def handler(event: dict, context) -> dict:
     req = urllib_request.Request(url, data=data, headers=headers, method=method)
 
     try:
-        with urllib_request.urlopen(req, timeout=60) as resp:
+        # ssl_context(): trusts the CA behind the internal ALB (private CA or imported
+        # certificate); None otherwise.
+        with urllib_request.urlopen(req, timeout=60, context=ssl_context()) as resp:
             resp_body = resp.read().decode("utf-8")
             return {
                 "statusCode": resp.status,

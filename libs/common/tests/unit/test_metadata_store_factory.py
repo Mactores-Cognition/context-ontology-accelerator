@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Unit tests for coa_common.metadata_store.factory.
 
 ``METADATA_STORE_BACKEND`` (set by the CDK flag ``metadata_store=dynamodb``)

@@ -6,8 +6,14 @@
 On every reload, registers a new task definition revision with the latest container
 image (from SSM, written by CDK deploy) before forcing a new deployment. This ensures
 ontology reloads always pick up the latest VKG image, not a stale one from provision time.
+
+A new namespace's service is made reachable through Cloud Map (default: a
+``vkg-{ns}`` DNS record) or, with ``SERVICE_DISCOVERY_BACKEND=alb``, through the
+internal services ALB (a target group plus a listener rule matching the
+``X-Coa-Namespace`` header).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -16,6 +22,7 @@ import boto3
 
 ecs = boto3.client("ecs")
 sd = boto3.client("servicediscovery")
+elbv2 = boto3.client("elbv2")
 ssm = boto3.client("ssm")
 autoscaling = boto3.client("application-autoscaling")
 cloudwatch = boto3.client("cloudwatch")
@@ -24,6 +31,22 @@ _NS_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 
 # Reload-outcome metrics; the vkg stack alarms on ReloadFailed.
 _METRIC_NAMESPACE = "COA/VKG"
+
+# Internal ALB mode (SERVICE_DISCOVERY_BACKEND=alb). The header name must match
+# coa_serve.clients.vkg.VKG_NAMESPACE_HEADER, and the target group name must
+# match coa_control_plane.namespace.cleanup (namespace delete).
+_ALB_BACKEND = "alb"
+VKG_NAMESPACE_HEADER = "X-Coa-Namespace"
+_VKG_PORT = 8080
+# The Ontop container allows 180 s to start (startPeriod); ALB health checks
+# wait longer than that before they can fail a new task.
+_HEALTH_CHECK_GRACE_SECONDS = 240
+_RULE_PRIORITY_ATTEMPTS = 5
+
+
+class AlbQuotaError(Exception):
+    """The ALB has no room for another namespace (target-group or rule quota)."""
+
 
 # Circuit breaker + rollback: paired with the container's functional /health
 # probe, a broken reload never goes healthy and rolls back to the last-good task.
@@ -341,10 +364,18 @@ def _register_task_definition(ns, prefix, container_image):
                     {"name": "NAMESPACE_ID", "value": ns},
                     {"name": "ENDPOINT_PORT", "value": "8080"},
                     {"name": "ONTOP_JAVA_ARGS", "value": ontop_java_args},
+                    # ALB mode is HTTPS-only: entrypoint.sh makes a self-signed
+                    # certificate and the facade serves TLS on 8080.
+                    *([{"name": "SERVICE_TLS", "value": "1"}] if _alb_mode() else []),
                 ],
                 "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
                 "healthCheck": {
-                    "command": ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"],
+                    "command": [
+                        "CMD-SHELL",
+                        "curl -sfk https://localhost:8080/health || exit 1"
+                        if _alb_mode()
+                        else "curl -sf http://localhost:8080/health || exit 1",
+                    ],
                     "interval": 30,
                     "timeout": 10,
                     "retries": 5,
@@ -367,14 +398,23 @@ def _register_task_definition(ns, prefix, container_image):
     return task_def_arn
 
 
+def _alb_mode():
+    """Whether the namespace's service is reached through the internal ALB."""
+    return os.environ.get("SERVICE_DISCOVERY_BACKEND", "") == _ALB_BACKEND
+
+
 def _provision_and_deploy(ns, service_name, cluster, prefix, version, container_image=None):
-    """Create Cloud Map entry and launch ECS service for a new namespace."""
+    """Create the Cloud Map entry or ALB route, then launch the ECS service for a new namespace."""
+    alb_mode = _alb_mode()
     cloud_map_ns_id = os.environ.get("CLOUD_MAP_NAMESPACE_ID", "")
+    listener_arn = os.environ.get("VKG_LISTENER_ARN", "")
+    vpc_id = os.environ.get("VPC_ID", "")
     ontology_bucket = os.environ.get("ONTOLOGY_BUCKET", "")
     subnet_ids = [s for s in os.environ.get("PRIVATE_SUBNET_IDS", "").split(",") if s]
     sg_id = os.environ.get("ECS_SECURITY_GROUP_ID", "")
 
-    if not all([cloud_map_ns_id, ontology_bucket, subnet_ids]):
+    discovery_settings = [listener_arn, vpc_id] if alb_mode else [cloud_map_ns_id]
+    if not all([*discovery_settings, ontology_bucket, subnet_ids]):
         print(json.dumps({"action": "provision_skipped", "namespace": ns, "reason": "missing env vars"}))
         return {"status": "skipped", "reason": "provision env vars not configured"}
 
@@ -385,19 +425,36 @@ def _provision_and_deploy(ns, service_name, cluster, prefix, version, container_
         _emit_metric("ReloadFailed", ns)
         return {"status": "failed", "reason": "cannot resolve container image"}
 
-    registry_arn = _ensure_cloud_map(ns, cloud_map_ns_id)
+    if alb_mode:
+        try:
+            target_group_arn = _ensure_alb_route(ns, prefix, listener_arn, vpc_id)
+        except AlbQuotaError as e:
+            print(json.dumps({"action": "provision_failed", "namespace": ns, "reason": str(e)}))
+            _emit_metric("ReloadFailed", ns)
+            return {"status": "failed", "reason": str(e)}
+        discovery = {
+            "loadBalancers": [
+                {"targetGroupArn": target_group_arn, "containerName": "ontop", "containerPort": _VKG_PORT}
+            ],
+            "healthCheckGracePeriodSeconds": _HEALTH_CHECK_GRACE_SECONDS,
+        }
+        discovery_ref = {"target_group_arn": target_group_arn}
+    else:
+        registry_arn = _ensure_cloud_map(ns, cloud_map_ns_id)
+        discovery = {"serviceRegistries": [{"registryArn": registry_arn}]}
+        discovery_ref = {"registry_arn": registry_arn}
     try:
         task_def_arn = _register_task_definition(ns, prefix, container_image)
     except Exception as e:
-        # The Cloud Map entry was just created (line above); without a task def
-        # the service can never be created, leaving it orphaned. Log with the
-        # dangling registry so an operator can reconcile, then fail the reload.
+        # The Cloud Map entry / ALB route was just created (above); without a
+        # task def the service can never be created, leaving it orphaned. Log
+        # with the dangling entry so an operator can reconcile, then fail the reload.
         print(
             json.dumps(
                 {
                     "action": "register_task_definition_failed",
                     "namespace": ns,
-                    "registry_arn": registry_arn,
+                    **discovery_ref,
                     "error": str(e),
                 }
             )
@@ -419,7 +476,7 @@ def _provision_and_deploy(ns, service_name, cluster, prefix, version, container_
                     "assignPublicIp": "DISABLED",
                 }
             },
-            serviceRegistries=[{"registryArn": registry_arn}],
+            **discovery,
             deploymentConfiguration={
                 "minimumHealthyPercent": 100,
                 "maximumPercent": 200,
@@ -474,6 +531,121 @@ def _configure_auto_scaling(cluster, service_name):
         print(json.dumps({"action": "autoscaling_configured", "service": service_name}))
     except Exception as e:
         print(json.dumps({"action": "autoscaling_failed", "service": service_name, "error": str(e)}))
+
+
+def _target_group_name(prefix, ns):
+    """Return the namespace's target group name: vkg- plus a hash (32 characters).
+
+    Target group names are limited to 32 characters and a namespace id is a
+    36-character UUID, so the name is derived; the namespace is kept in a tag.
+    """
+    return "vkg-" + hashlib.sha256(f"{prefix}:{ns}".encode()).hexdigest()[:28]
+
+
+def _listener_rules(listener_arn):
+    """Return every rule on the listener (follows NextMarker)."""
+    rules, marker = [], None
+    while True:
+        kwargs = {"ListenerArn": listener_arn}
+        if marker:
+            kwargs["Marker"] = marker
+        page = elbv2.describe_rules(**kwargs)
+        rules.extend(page.get("Rules", []))
+        marker = page.get("NextMarker")
+        if not marker:
+            return rules
+
+
+def _namespace_rule(rules, ns):
+    """Return the rule that matches the namespace's header, or None."""
+    for rule in rules:
+        for condition in rule.get("Conditions", []):
+            config = condition.get("HttpHeaderConfig") or {}
+            if (
+                condition.get("Field") == "http-header"
+                and config.get("HttpHeaderName", "").lower() == VKG_NAMESPACE_HEADER.lower()
+                and ns in config.get("Values", [])
+            ):
+                return rule
+    return None
+
+
+def _forward_target_group(rule):
+    """Return the target group a rule forwards to."""
+    for action in rule.get("Actions", []):
+        if action.get("Type") != "forward":
+            continue
+        if action.get("TargetGroupArn"):
+            return action["TargetGroupArn"]
+        groups = (action.get("ForwardConfig") or {}).get("TargetGroups") or []
+        if groups:
+            return groups[0]["TargetGroupArn"]
+    return None
+
+
+def _ensure_alb_route(ns, prefix, listener_arn, vpc_id):
+    """Create or find the namespace's target group and listener rule. Returns the target group ARN.
+
+    Order matters: ECS rejects a target group that no listener uses, so the rule
+    is created before the service.
+
+    Raises:
+        AlbQuotaError: When the ALB has no room for another target group or rule.
+    """
+    rules = _listener_rules(listener_arn)
+    existing = _namespace_rule(rules, ns)
+    if existing and _forward_target_group(existing):
+        return _forward_target_group(existing)
+
+    tags = [{"Key": "coa:namespace", "Value": ns}, {"Key": "coa:prefix", "Value": prefix}]
+    try:
+        tg = elbv2.create_target_group(
+            Name=_target_group_name(prefix, ns),
+            Protocol="HTTPS",
+            Port=_VKG_PORT,
+            VpcId=vpc_id,
+            TargetType="ip",
+            HealthCheckProtocol="HTTPS",
+            HealthCheckPath="/health",
+            HealthCheckIntervalSeconds=30,
+            Matcher={"HttpCode": "200"},
+            Tags=tags,
+        )
+    except elbv2.exceptions.TooManyTargetGroupsException as e:
+        raise AlbQuotaError(
+            "ALB target group quota reached (100 per ALB, at most 99 namespaces with VKG): " + str(e)
+        ) from e
+    target_group_arn = tg["TargetGroups"][0]["TargetGroupArn"]
+    # The 300 s default would hold every reload and delete for five minutes.
+    elbv2.modify_target_group_attributes(
+        TargetGroupArn=target_group_arn,
+        Attributes=[{"Key": "deregistration_delay.timeout_seconds", "Value": "30"}],
+    )
+
+    used = [int(r["Priority"]) for r in rules if str(r.get("Priority", "")).isdigit()]
+    priority = max(used, default=0) + 1
+    for _ in range(_RULE_PRIORITY_ATTEMPTS):
+        try:
+            elbv2.create_rule(
+                ListenerArn=listener_arn,
+                Priority=priority,
+                Conditions=[
+                    {
+                        "Field": "http-header",
+                        "HttpHeaderConfig": {"HttpHeaderName": VKG_NAMESPACE_HEADER, "Values": [ns]},
+                    }
+                ],
+                Actions=[{"Type": "forward", "TargetGroupArn": target_group_arn}],
+                Tags=tags,
+            )
+            print(json.dumps({"action": "alb_route_created", "namespace": ns, "priority": priority}))
+            return target_group_arn
+        except elbv2.exceptions.PriorityInUseException:
+            # Another provision took this number in the meantime: try the next one.
+            priority += 1
+        except elbv2.exceptions.TooManyRulesException as e:
+            raise AlbQuotaError("ALB listener rule quota reached (100 per ALB by default): " + str(e)) from e
+    raise RuntimeError(f"No free listener rule priority for namespace {ns} after {_RULE_PRIORITY_ATTEMPTS} attempts")
 
 
 def _ensure_cloud_map(ns, cloud_map_ns_id):

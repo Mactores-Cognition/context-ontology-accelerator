@@ -41,6 +41,7 @@ import structlog
 from coa_common.constants import SOURCE_ACTIVE_STATUSES
 from coa_common.dao import DynamoDBDAO, QueryParams
 from coa_common.response import api_response
+from coa_common.service_tls import ssl_context
 from coa_control_plane_server.models.namespace_status import NamespaceStatus
 
 logger = structlog.get_logger(__name__)
@@ -286,7 +287,9 @@ def _check_active_induction_jobs(namespace_id: str) -> list[str]:
     for attempt in range(attempts):
         req = urllib_request.Request(url, method="GET")
         try:
-            with urllib_request.urlopen(req, timeout=call_timeout) as resp:  # noqa: S310
+            # ssl_context(): trusts the CA behind the internal ALB (private CA or imported
+            # certificate); None otherwise.
+            with urllib_request.urlopen(req, timeout=call_timeout, context=ssl_context()) as resp:  # noqa: S310
                 body = json.loads(resp.read().decode("utf-8"))
         except (HTTPError, URLError, OSError) as e:
             last_error = e

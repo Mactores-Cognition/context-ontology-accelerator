@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """coa_common.metadata_store.reader in DynamoDB mode (METADATA_STORE_BACKEND=dynamodb).
 
 The readers are shared by enrichment, rescans, metric validation and ontology

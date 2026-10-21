@@ -22,6 +22,7 @@ per-source catalog/schema lookup (athena.py ``_resolve_catalog_and_database``).
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -30,7 +31,7 @@ from typing import Any
 import structlog
 
 from ...clients.base import QueryExecutor, QueryResult
-from ...clients.vkg import SparqlProjection, VKGClient, VKGResult
+from ...clients.vkg import VKG_NAMESPACE_HEADER, SparqlProjection, VKGClient, VKGResult
 from ...identity import display_principal
 from ..sql_firewall import FirewallResult, SQLFirewall
 from ..table_qualifier import SourceLookup, distinct_datasources, prepare_execution_sql
@@ -129,23 +130,32 @@ class VKGTranslator:
     def _resolve_client(self, namespace: str) -> VKGClient:
         """Resolve a VKGClient for the given namespace.
 
-        Rewrites the base VKG endpoint to target the per-namespace service:
+        Cloud Map (default) rewrites the base VKG endpoint to target the
+        per-namespace service:
           "http://vkg.coa-dev-services.local:8080"
             → "http://vkg-{namespace}.coa-dev-services.local:8080"
+
+        Behind the internal services ALB (``SERVICE_DISCOVERY_BACKEND=alb``) the
+        endpoint is kept and the namespace goes in the ``X-Coa-Namespace``
+        header, which the ALB's listener rules route on.
 
         Clients are cached per namespace (bounded to 64) to reuse HTTP connections.
         """
         if namespace not in self._clients:
-            url = self._vkg_endpoint.replace("://vkg.", f"://vkg-{namespace}.")
-            if url == self._vkg_endpoint:
-                raise ValueError(
-                    f"Cannot resolve per-namespace VKG: endpoint '{self._vkg_endpoint}' "
-                    f"does not contain '://vkg.' to rewrite"
-                )
+            if os.environ.get("SERVICE_DISCOVERY_BACKEND", "") == "alb":
+                client = VKGClient(base_url=self._vkg_endpoint, headers={VKG_NAMESPACE_HEADER: namespace})
+            else:
+                url = self._vkg_endpoint.replace("://vkg.", f"://vkg-{namespace}.")
+                if url == self._vkg_endpoint:
+                    raise ValueError(
+                        f"Cannot resolve per-namespace VKG: endpoint '{self._vkg_endpoint}' "
+                        f"does not contain '://vkg.' to rewrite"
+                    )
+                client = VKGClient(base_url=url)
             if len(self._clients) >= self._MAX_CACHED_CLIENTS:
                 oldest = next(iter(self._clients))
                 del self._clients[oldest]
-            self._clients[namespace] = VKGClient(base_url=url)
+            self._clients[namespace] = client
         return self._clients[namespace]
 
     async def resolve(

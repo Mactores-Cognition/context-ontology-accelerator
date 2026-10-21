@@ -612,3 +612,180 @@ describe("OntologyStack in DynamoDB mode (metadata_store=dynamodb)", () => {
     });
   });
 });
+
+// Internal ALB instead of Cloud Map (service_discovery=alb): ontology-engine is
+// the default action of an ALB listener on its container port, and every
+// endpoint points at the ALB. Default mode is covered by the suites above.
+describe("OntologyStack in ALB mode (service_discovery=alb)", () => {
+  function renderAlb(context: Record<string, unknown>, id: string): Template {
+    const app = new cdk.App({ context: { ...TEST_CONTEXT, ...context } });
+    const network = new NetworkStack(app, `${id}Network`);
+    return Template.fromStack(
+      new OntologyStack(app, id, {
+        network,
+        serviceNamespace: network.serviceNamespace,
+        neptuneClusterArn:
+          "arn:aws:neptune-db:us-east-1:123456789012:cluster-abc123/*",
+        neptuneClusterEndpoint:
+          "test-neptune.cluster-abc.us-east-1.neptune.amazonaws.com",
+        ontologyArtifactsBucket: cdk.aws_s3.Bucket.fromBucketName(
+          network,
+          `${id}ArtifactsBucket`,
+          "coa-dev-ontology-artifacts-123456789012",
+        ),
+        smusDomainId: "dzd-test123",
+        allowedOrigin: "https://test.example.com",
+      }),
+    );
+  }
+
+  let template: Template;
+  beforeAll(() => {
+    template = renderAlb({ service_discovery: "alb" }, "AlbOntology");
+  });
+
+  const ssmValue = (t: Template, name: string): string => {
+    const params = t.findResources("AWS::SSM::Parameter", {
+      Properties: { Name: name },
+    });
+    const [param] = Object.values(params) as any[];
+    expect(param).toBeDefined();
+    return JSON.stringify(param.Properties.Value);
+  };
+
+  test("ALB mode: ECS service registers with a load balancer, not Cloud Map", () => {
+    const services = Object.values(
+      template.findResources("AWS::ECS::Service"),
+    ) as any[];
+    expect(services).toHaveLength(1);
+    const props = services[0].Properties;
+    expect(props.ServiceRegistries).toBeUndefined();
+    // The ALB reaches the container's HTTPS port (8443); 8001 stays for the
+    // container's own calls on localhost.
+    expect(props.LoadBalancers).toEqual([
+      expect.objectContaining({ ContainerPort: 8443 }),
+    ]);
+    expect(props.HealthCheckGracePeriodSeconds).toBeGreaterThanOrEqual(90);
+  });
+
+  test("ALB mode: HTTPS listener on 8001 forwards to an HTTPS IP target group with /health checks", () => {
+    template.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8001,
+      Protocol: "HTTPS",
+      Certificates: [Match.objectLike({ CertificateArn: Match.anyValue() })],
+      DefaultActions: [Match.objectLike({ Type: "forward" })],
+    });
+    template.hasResourceProperties("AWS::ElasticLoadBalancingV2::TargetGroup", {
+      Port: 8443,
+      Protocol: "HTTPS",
+      TargetType: "ip",
+      HealthCheckPath: "/health",
+      HealthCheckProtocol: "HTTPS",
+      TargetGroupAttributes: Match.arrayWith([
+        { Key: "deregistration_delay.timeout_seconds", Value: "30" },
+      ]),
+    });
+  });
+
+  test("ALB mode: endpoint SSM parameter and api-proxy env use the HTTPS service name", () => {
+    const endpoint = ssmValue(template, "/coa/ontology-engine/endpoint");
+    expect(endpoint).toBe(JSON.stringify("https://ontology-engine.coa-dev.internal:8001"));
+
+    const fns = Object.values(
+      template.findResources("AWS::Lambda::Function"),
+    ) as any[];
+    const proxy = fns.find(
+      (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    expect(proxy).toBeDefined();
+    expect(proxy.Properties.Environment.Variables.ONTOLOGY_ENGINE_ENDPOINT).toBe(
+      "https://ontology-engine.coa-dev.internal:8001",
+    );
+  });
+
+  test("ALB mode: container serves HTTPS on 8443 for the ALB and keeps 8001", () => {
+    expect(envValue(template, "SERVICE_TLS_PORT")).toBe("8443");
+    const taskDefs = Object.values(template.findResources("AWS::ECS::TaskDefinition")) as any[];
+    const ports = taskDefs
+      .flatMap((d) => d.Properties.ContainerDefinitions)
+      .flatMap((c: any) => c.PortMappings ?? [])
+      .map((m: any) => m.ContainerPort);
+    expect(ports).toEqual(expect.arrayContaining([8001, 8443]));
+  });
+
+  test("ALB mode: api-proxy trusts the private CA (parameter name + ssm:GetParameter on it)", () => {
+    const fns = Object.values(template.findResources("AWS::Lambda::Function")) as any[];
+    const proxy = fns.find(
+      (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    expect(proxy.Properties.Environment.Variables.SERVICE_CA_CERT_PARAM).toBe(
+      "/coa/services/ca-cert",
+    );
+    const statements = Object.values(template.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (s: any) =>
+          [s.Action].flat().includes("ssm:GetParameter") &&
+          JSON.stringify(s.Resource).includes("/coa/services/ca-cert"),
+      ),
+    ).toBe(true);
+  });
+
+  test("ALB mode with the client's certificate (imported): listener uses it; api-proxy trusts it through ACM", () => {
+    const certArn =
+      "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555";
+    const t = renderAlb(
+      {
+        service_discovery: "alb",
+        service_cert: "imported",
+        service_cert_arn: certArn,
+        service_domain: "coa.example.com",
+      },
+      "CertOntology",
+    );
+    t.hasResourceProperties("AWS::ElasticLoadBalancingV2::Listener", {
+      Port: 8001,
+      Protocol: "HTTPS",
+      Certificates: [{ CertificateArn: certArn }],
+    });
+    const fns = Object.values(t.findResources("AWS::Lambda::Function")) as any[];
+    const proxy = fns.find(
+      (f) => f.Properties.Environment?.Variables?.ONTOLOGY_ENGINE_ENDPOINT,
+    );
+    const vars = proxy.Properties.Environment.Variables;
+    expect(vars.ONTOLOGY_ENGINE_ENDPOINT).toBe(
+      "https://ontology-engine.coa.example.com:8001",
+    );
+    expect(vars.SERVICE_CERT_ARN).toBe(certArn);
+    expect(vars).not.toHaveProperty("SERVICE_CA_CERT_PARAM");
+    const statements = Object.values(t.findResources("AWS::IAM::Policy"))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    expect(
+      statements.some(
+        (s: any) =>
+          [s.Action].flat().includes("acm:GetCertificate") &&
+          JSON.stringify(s.Resource) === JSON.stringify(certArn),
+      ),
+    ).toBe(true);
+  });
+
+  test("ALB mode: publishes no Cloud Map namespace ARN", () => {
+    expect(
+      Object.keys(
+        template.findResources("AWS::SSM::Parameter", {
+          Properties: { Name: "/coa/ontology-engine/service-namespace-arn" },
+        }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("default mode: no listener or target group; Cloud Map registration stays", () => {
+    const def = renderAlb({}, "DefaultOntology");
+    def.resourceCountIs("AWS::ElasticLoadBalancingV2::Listener", 0);
+    def.resourceCountIs("AWS::ElasticLoadBalancingV2::TargetGroup", 0);
+    const [svc] = Object.values(def.findResources("AWS::ECS::Service")) as any[];
+    expect(svc.Properties.ServiceRegistries).toHaveLength(1);
+    expect(envValue(def, "SERVICE_TLS_PORT")).toBeUndefined();
+  });
+});

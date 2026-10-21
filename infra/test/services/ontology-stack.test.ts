@@ -98,10 +98,12 @@ describe("OntologyStack model IDs from deploy config (#94)", () => {
 
   test("omitting config keeps the previous defaults (backward compatibility)", () => {
     const t = renderOntology({}, "DefaultOntology");
-    expect(envValue(t, "BEDROCK_EMBED_MODEL_ID")).toBe("us.cohere.embed-v4:0");
+    expect(envValue(t, "BEDROCK_EMBED_MODEL_ID")).toBe(
+      "amazon.nova-2-multimodal-embeddings-v1:0",
+    );
     expect(envValue(t, "BEDROCK_EMBED_DIMENSIONS")).toBe("1024");
     expect(envValue(t, "OSS_DIMENSIONS")).toBe("1024");
-    expect(envValue(t, "LLM_MODEL_ID")).toBe("us.anthropic.claude-sonnet-5");
+    expect(envValue(t, "LLM_MODEL_ID")).toBe("us.amazon.nova-pro-v1:0");
   });
 
   test("dashboard ModelId dimensions follow the configured models", () => {
@@ -123,6 +125,18 @@ describe("OntologyStack model IDs from deploy config (#94)", () => {
     // No stale us. literals left behind in the widgets.
     expect(body).not.toContain("us.anthropic.claude-sonnet-4-6");
     expect(body).not.toContain("us.cohere.embed-v4:0");
+  });
+
+  test("a model shared by induction and chat is priced once, at its own rate", () => {
+    // Both roles default to Nova Pro; summing a term per role would count
+    // the same AWS/Bedrock tokens twice.
+    const t = renderOntology({}, "SharedModelDash");
+    const body = JSON.stringify(
+      Object.values(t.findResources("AWS::CloudWatch::Dashboard")),
+    );
+    expect(body).toContain("i0*0.0008/1000 + o0*0.0032/1000");
+    expect(body).not.toContain("i1*");
+    expect(body).not.toContain("0.015");
   });
 });
 

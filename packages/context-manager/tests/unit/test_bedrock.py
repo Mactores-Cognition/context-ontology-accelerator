@@ -1852,3 +1852,54 @@ class TestConverseTopPAndTemperatureObservability:
             assert "topP" not in cfg
         finally:
             bedrock_mod._MODELS_REJECTING_TOP_P.discard("learned-topp-model")
+
+
+@pytest.mark.unit
+class TestNovaCompatibility:
+    """Model-family handling needed for Amazon Nova Pro (output ceiling and
+    sampling-parameter error wording)."""
+
+    async def test_max_tokens_clamped_to_nova_pro_output_ceiling(self):
+        """TIER3_SYNTH_MAX_TOKENS allows up to 64000, but Nova Pro rejects any
+        maxTokens above 10K; the client must cap the request."""
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        mc = MagicMock()
+        mc.converse.return_value = {"output": {"message": {"content": [{"text": "ok"}]}}}
+        client = BedrockLLMClient(model_id="us.amazon.nova-pro-v1:0", region="us-east-1")
+        client._client = mc
+        await client.converse("test", max_tokens=64000)
+
+        assert mc.converse.call_args[1]["inferenceConfig"]["maxTokens"] == 10_000
+
+    async def test_max_tokens_untouched_for_models_without_known_ceiling(self):
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        mc = MagicMock()
+        mc.converse.return_value = {"output": {"message": {"content": [{"text": "ok"}]}}}
+        client = BedrockLLMClient(model_id="test-model", region="us-east-1")
+        client._client = mc
+        await client.converse("test", max_tokens=64000)
+
+        assert mc.converse.call_args[1]["inferenceConfig"]["maxTokens"] == 64000
+
+    async def test_topP_spelling_in_validation_error_triggers_retry(self):
+        """A provider that names the parameter ``topP`` (not Anthropic's ``top_p``)
+        must still trigger the drop-and-retry path."""
+        from botocore.exceptions import ClientError
+        from coa_serve.clients import bedrock as bedrock_mod
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        bedrock_mod._MODELS_REJECTING_TOP_P.discard("nova-like-model")
+        mc = MagicMock()
+        err = {"Error": {"Code": "ValidationException", "Message": "Invalid value for topP: must be greater than 0"}}
+        mc.converse.side_effect = [
+            ClientError(err, "Converse"),
+            {"output": {"message": {"content": [{"text": "ok"}]}}},
+        ]
+        client = BedrockLLMClient(model_id="nova-like-model", region="us-east-1")
+        client._client = mc
+        result = await client.converse("test", top_p=0)
+
+        assert result.text == "ok"
+        assert "topP" not in mc.converse.call_args_list[1][1]["inferenceConfig"]

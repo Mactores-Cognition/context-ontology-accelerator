@@ -15,12 +15,14 @@ import boto3
 from botocore.config import Config
 
 from coa_common.config import resolve_region
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 from coa_common.guardrail_metrics import (
     COMPONENT_ENRICHMENT,
     assessments_from_trace,
     emit_guardrail_decision,
     filter_type_from_assessments,
 )
+from coa_common.model_limits import clamp_max_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 # metric-service embed fallback chain, and reusing it here would cross-wire
 # those models into this client. Must stay in step with the TypeScript
 # DEFAULT_BEDROCK_CHAT_MODEL_ID (libs/ts-shared/src/constants.ts).
-FALLBACK_CHAT_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+FALLBACK_CHAT_MODEL_ID = DEFAULT_LLM_MODEL_ID
 
 
 def resolve_chat_model_id(default: str = FALLBACK_CHAT_MODEL_ID) -> str:
@@ -122,6 +124,35 @@ class InputTooLargeError(ValueError):
     """Raised when the combined prompt exceeds the configured input-size cap."""
 
 
+def parse_json_payload(text: str) -> object:
+    """Parse a model reply that should be a single JSON value.
+
+    Strips a surrounding markdown code fence, then parses. If that fails, parses
+    the first JSON object or array in the text and ignores prose around it:
+    models outside the Claude family (e.g. Amazon Nova) often add a sentence
+    before or after the JSON even when told not to. Raises
+    ``json.JSONDecodeError`` when no JSON value can be found.
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[1] if "\n" in stripped else stripped[3:]
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[:-3]
+        stripped = stripped.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as first_error:
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(stripped):
+            if char in "{[":
+                try:
+                    value, _end = decoder.raw_decode(stripped, index)
+                    return value
+                except json.JSONDecodeError:
+                    continue
+        raise first_error
+
+
 @dataclass(frozen=True)
 class BedrockInvocationResult:
     """Result of a Bedrock invocation including parsed content and usage."""
@@ -205,6 +236,9 @@ class BedrockClient:
                 f"Combined prompt is {input_chars} chars, exceeds limit of {self._max_input_chars}"
             )
         start = time.monotonic()
+        # Capped at the model's output ceiling (e.g. Nova Pro 10K): a budget
+        # above it is a ValidationException, not a longer answer.
+        max_tokens = clamp_max_tokens(self._model_id, max_tokens)
         kwargs = {
             "modelId": self._model_id,
             "messages": [{"role": "user", "content": [{"text": user_prompt}]}],
@@ -320,13 +354,7 @@ class BedrockClient:
             if not content.strip():
                 logger.error("Bedrock returned empty content")
                 raise ValueError("Bedrock returned empty response")
-            text = content.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-                if text.endswith("```"):
-                    text = text[:-3]
-                text = text.strip()
-            result = json.loads(text)
+            result = parse_json_payload(content)
             return BedrockInvocationResult(
                 result=result,
                 input_tokens=input_tokens,

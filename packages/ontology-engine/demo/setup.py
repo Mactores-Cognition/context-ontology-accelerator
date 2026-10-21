@@ -89,7 +89,7 @@ ENGINE_URL = _svc.get("ontology-inducer", CATALOG_URL)  # consolidated: same URL
 
 # Bedrock embedding config — read from env (same vars the engine uses)
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", os.getenv("AWS_REGION", "us-east-1"))
-BEDROCK_EMBED_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL_ID", "us.cohere.embed-v4:0")
+BEDROCK_EMBED_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.nova-2-multimodal-embeddings-v1:0")
 BEDROCK_EMBED_DIMENSIONS = int(os.getenv("BEDROCK_EMBED_DIMENSIONS", "1024"))
 
 

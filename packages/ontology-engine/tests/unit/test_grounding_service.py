@@ -452,3 +452,41 @@ class TestCostTrackerIntegration:
             )
         # LLM abstained (choice NONE) → novel, and no crash without a tracker.
         assert result.match_type == "novel"
+
+
+class TestModelResolution:
+    """The rerank model and region come from deployment config, not a hard-coded
+    Claude model in us-east-1 (Claude is not available in every target region)."""
+
+    @pytest.fixture
+    def env(self, monkeypatch):
+        for var in ("GROUNDING_LLM_MODEL_ID", "BEDROCK_CHAT_MODEL_ID", "LLM_REGION"):
+            monkeypatch.delenv(var, raising=False)
+        return monkeypatch
+
+    def test_defaults_to_shared_constant(self, env, mock_catalog, mock_eg):
+        from coa_common.constants import DEFAULT_LLM_MODEL_ID
+
+        svc = GroundingService(ontology_catalog=mock_catalog, embedding_generator=mock_eg)
+        assert svc._llm_model_id == DEFAULT_LLM_MODEL_ID
+
+    def test_env_resolution_order(self, env, mock_catalog, mock_eg):
+        env.setenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
+        env.setenv("LLM_REGION", "us-gov-west-1")
+        svc = GroundingService(ontology_catalog=mock_catalog, embedding_generator=mock_eg)
+        assert svc._llm_model_id == "amazon.nova-pro-v1:0"
+        assert svc._llm_region == "us-gov-west-1"
+        env.setenv("GROUNDING_LLM_MODEL_ID", "some.rerank-model")
+        svc = GroundingService(ontology_catalog=mock_catalog, embedding_generator=mock_eg)
+        assert svc._llm_model_id == "some.rerank-model"
+
+    def test_explicit_args_win(self, env, mock_catalog, mock_eg):
+        env.setenv("GROUNDING_LLM_MODEL_ID", "some.rerank-model")
+        svc = GroundingService(
+            ontology_catalog=mock_catalog,
+            embedding_generator=mock_eg,
+            llm_model_id="explicit.model",
+            llm_region="eu-west-1",
+        )
+        assert svc._llm_model_id == "explicit.model"
+        assert svc._llm_region == "eu-west-1"

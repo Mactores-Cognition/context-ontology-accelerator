@@ -2479,7 +2479,7 @@ describe("SourcesStack", () => {
       // has NO account field — building an inference-profile ARN for it yields a
       // resource that does not exist and fails at extraction time.
       const t = renderWithModels({
-        bedrockChatModelId: "anthropic.claude-haiku-4-5-20251001-v1:0",
+        bedrockChatModelId: "amazon.nova-pro-v1:0",
       });
       const env = envOf(
         t,
@@ -2487,7 +2487,7 @@ describe("SourcesStack", () => {
       );
       const arn = JSON.stringify(env.BEDROCK_MODEL_ARN);
       expect(arn).toContain(
-        "foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+        "foundation-model/amazon.nova-pro-v1:0",
       );
       expect(arn).not.toContain("inference-profile");
       // Empty account segment: ...:bedrock:<region>::foundation-model/...
@@ -2501,7 +2501,7 @@ describe("SourcesStack", () => {
         /sources-doc-trigger|documents-trigger|doc.*trigger/i,
       );
       expect(JSON.stringify(env.BEDROCK_MODEL_ARN)).toContain(
-        "inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "inference-profile/us.amazon.nova-pro-v1:0",
       );
     });
   });

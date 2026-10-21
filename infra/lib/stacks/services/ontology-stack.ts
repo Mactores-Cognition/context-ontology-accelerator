@@ -843,19 +843,45 @@ export class OntologyStack extends SCLStack {
     // container environment above (#94) — they used to be duplicate literals, so
     // a model change for a non-US deploy left these widgets querying a
     // dimension with no data.
-    const rerankModelId = inductionModelId; // configured LLM_MODEL_ID
-    const haikuModelId = chatModelId; // actual rerank/enrichment invoker
+    // Induction (LLM_MODEL_ID) and chat (grounding rerank, enrichment) default to
+    // the same model; dedupe so a shared model is graphed and priced once.
+    const llmModelIds = [...new Set([inductionModelId, chatModelId])];
 
-    // ponytail: Hardcoded us-west-2 on-demand list prices (USD per 1K tokens) as of
-    // 2026-07-21 — CloudWatch math cannot look prices up, so these MUST be updated by
-    // hand if AWS Bedrock pricing changes. The Sonnet >200K-context tier ($6/$22.50
-    // per 1M) is intentionally NOT modeled: induction prompts are per-table and small,
-    // so only the base tier applies.
-    const sonnetInputPer1K = 0.003;
-    const sonnetOutputPer1K = 0.015;
-    const haikuInputPer1K = 0.001;
-    const haikuOutputPer1K = 0.005;
-    const embedInputPer1K = 0.00012;
+    // ponytail: Hardcoded on-demand list prices (USD per 1K tokens) — CloudWatch
+    // math cannot look prices up, so these MUST be updated by hand if AWS Bedrock
+    // pricing changes. Nova Pro ($0.80/$3.20 per 1M, as in
+    // coa_common.bedrock_metrics) is the default; the Claude rows (Sonnet base tier,
+    // Haiku 4.5) price commercial deployments that override the model. Unlisted
+    // models are priced at the Nova Pro rate.
+    const llmPricePer1K = (modelId: string): { input: number; output: number } => {
+      const id = modelId.toLowerCase();
+      if (id.includes("claude") && id.includes("sonnet")) {
+        return { input: 0.003, output: 0.015 };
+      }
+      if (id.includes("claude") && id.includes("haiku")) {
+        return { input: 0.001, output: 0.005 };
+      }
+      return { input: 0.0008, output: 0.0032 };
+    };
+    // Embedding input price per 1K tokens: Nova Multimodal Embeddings (the
+    // default; Price List API, us-east-1 on-demand), Titan V2, else the earlier
+    // Cohere figure.
+    const embedId = embedModelId.toLowerCase();
+    const embedInputPer1K = embedId.includes("multimodal-embeddings")
+      ? 0.000135
+      : embedId.includes("titan-embed")
+        ? 0.00002
+        : 0.00012;
+    const llmCostTerms = llmModelIds.map((modelId, i) => {
+      const price = llmPricePer1K(modelId);
+      return {
+        expression: `i${i}*${price.input}/1000 + o${i}*${price.output}/1000`,
+        metrics: {
+          [`i${i}`]: bedrockModelMetric("InputTokenCount", modelId),
+          [`o${i}`]: bedrockModelMetric("OutputTokenCount", modelId),
+        },
+      };
+    });
 
     const dashboard = new cloudwatch.Dashboard(this, "InductionDashboard", {
       dashboardName: this.prefixed("ontology-induction"),
@@ -1033,13 +1059,13 @@ export class OntologyStack extends SCLStack {
       new cloudwatch.GraphWidget({
         title: "AWS/Bedrock per-model",
         left: [
-          bedrockModelMetric("Invocations", rerankModelId),
-          bedrockModelMetric("Invocations", haikuModelId),
+          ...llmModelIds.map((id) => bedrockModelMetric("Invocations", id)),
           bedrockModelMetric("Invocations", embedModelId),
         ],
         right: [
-          bedrockModelMetric("InvocationThrottles", rerankModelId),
-          bedrockModelMetric("InvocationThrottles", haikuModelId),
+          ...llmModelIds.map((id) =>
+            bedrockModelMetric("InvocationThrottles", id),
+          ),
           bedrockModelMetric("InvocationThrottles", embedModelId),
         ],
         leftYAxis: { label: "invocations", showUnits: false },
@@ -1056,15 +1082,16 @@ export class OntologyStack extends SCLStack {
           new cloudwatch.MathExpression({
             // Total Bedrock spend: tokens are counts, so divide each term by 1000.
             // Cohere embed is input-only (no output term).
-            expression: `si*${sonnetInputPer1K}/1000 + so*${sonnetOutputPer1K}/1000 + hi*${haikuInputPer1K}/1000 + ho*${haikuOutputPer1K}/1000 + ei*${embedInputPer1K}/1000`,
+            expression: [
+              ...llmCostTerms.map((t) => t.expression),
+              `ei*${embedInputPer1K}/1000`,
+            ].join(" + "),
             label: "Est. cost (USD)",
-            usingMetrics: {
-              si: bedrockModelMetric("InputTokenCount", rerankModelId),
-              so: bedrockModelMetric("OutputTokenCount", rerankModelId),
-              hi: bedrockModelMetric("InputTokenCount", haikuModelId),
-              ho: bedrockModelMetric("OutputTokenCount", haikuModelId),
-              ei: bedrockModelMetric("InputTokenCount", embedModelId),
-            },
+            usingMetrics: Object.assign(
+              {},
+              ...llmCostTerms.map((t) => t.metrics),
+              { ei: bedrockModelMetric("InputTokenCount", embedModelId) },
+            ),
             period: defaultPeriod,
           }),
         ],
@@ -1098,8 +1125,9 @@ export class OntologyStack extends SCLStack {
           // Rerank errors are intentionally absent — the emitter publishes no
           // rerank-errors metric (out of scope for this consolidation).
           inductionSearch("InductionJobErrors", "Sum", "Job errors"),
-          bedrockModelMetric("InvocationThrottles", rerankModelId),
-          bedrockModelMetric("InvocationThrottles", haikuModelId),
+          ...llmModelIds.map((id) =>
+            bedrockModelMetric("InvocationThrottles", id),
+          ),
           bedrockModelMetric("InvocationThrottles", embedModelId),
         ],
         width: 24,

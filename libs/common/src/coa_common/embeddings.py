@@ -10,11 +10,22 @@ stay identical across the stack. Mixing models silently breaks retrieval:
 vectors from different models are not comparable, so k-NN similarity collapses
 to noise with no error raised.
 
-The model id defaults to :data:`DEFAULT_EMBED_MODEL_ID` (Cohere Embed v4 via an
-inference profile) but can be overridden per instance or via the
+The model id defaults to :data:`DEFAULT_EMBED_MODEL_ID` (Amazon Nova Multimodal
+Embeddings, in-region) but can be overridden per instance or via the
 ``BEDROCK_EMBED_MODEL_ID`` environment variable.
 
-Two providers are supported because their Bedrock wire formats differ:
+Three providers are supported because their Bedrock wire formats differ:
+
+* **Amazon Nova Multimodal Embeddings** (``amazon.nova-*-multimodal-embeddings-*``)
+  — request ``{"taskType": "SINGLE_EMBEDDING", "singleEmbeddingParams":
+  {"embeddingPurpose": "GENERIC_INDEX"|"TEXT_RETRIEVAL", "embeddingDimension": N,
+  "text": {"truncationMode": "END", "value": "..."}}}`` → response
+  ``{"embeddings": [{"embeddingType": "TEXT", "embedding": [...]}]}``. Asymmetric
+  like Cohere: stored content is embedded for indexing (``GENERIC_INDEX``) and
+  queries for searching a text-only index (``TEXT_RETRIEVAL``). One text per
+  call (no batch), dimensions 256/384/1024/3072 only, and vectors are
+  L2-normalised client-side (the docs do not promise unit vectors; the L2
+  k-NN indexes and score thresholds assume them).
 
 * **Cohere** (``cohere.embed-*``) — request ``{"texts": [...], "input_type":
   "search_document"|"search_query", "output_dimension": N, "embedding_types":
@@ -84,6 +95,20 @@ InputType = Literal["document", "query"]
 
 def _embed_backoff(attempt: int) -> float:
     return min(_EMBED_MAX_BACKOFF_S, 2.0**attempt) + random.uniform(0, 1)
+
+
+# Nova Multimodal Embeddings accepts only these output sizes.
+_NOVA_EMBED_DIMENSIONS = frozenset({256, 384, 1024, 3072})
+
+
+def _is_nova_embed(model_id: str) -> bool:
+    # "amazon.nova-2-multimodal-embeddings-v1:0" (bare in-region id or ARN).
+    return "nova" in model_id and "multimodal-embeddings" in model_id
+
+
+def _l2_normalise(vector: list[float]) -> list[float]:
+    norm = math.sqrt(sum(v * v for v in vector))
+    return [v / norm for v in vector] if norm else vector
 
 
 def _is_cohere(model_id: str) -> bool:
@@ -208,6 +233,9 @@ class BedrockEmbedder:
         """Resolve model/region/timeout config and clamp the batch size (see class Args)."""
         self.model_id = model_id or os.environ.get("BEDROCK_EMBED_MODEL_ID", DEFAULT_EMBED_MODEL_ID)
         self.dimensions = dimensions
+        if _is_nova_embed(self.model_id) and dimensions not in _NOVA_EMBED_DIMENSIONS:
+            # Fail at construction, not on every InvokeModel with a ValidationException.
+            raise ValueError(f"{self.model_id} supports dimensions {sorted(_NOVA_EMBED_DIMENSIONS)}, got {dimensions}")
         self._region = region or os.environ.get("BEDROCK_REGION", resolve_region())
         self._max_workers = max_workers
         self._read_timeout = read_timeout if read_timeout is not None else _env_read_timeout()
@@ -246,6 +274,17 @@ class BedrockEmbedder:
     # ── request/response encoding per provider ──────────────────────────
     def _request_body(self, text: str, input_type: InputType) -> str:
         payload = _prep(text)
+        if _is_nova_embed(self.model_id):
+            return json.dumps(
+                {
+                    "taskType": "SINGLE_EMBEDDING",
+                    "singleEmbeddingParams": {
+                        "embeddingPurpose": "GENERIC_INDEX" if input_type == "document" else "TEXT_RETRIEVAL",
+                        "embeddingDimension": self.dimensions,
+                        "text": {"truncationMode": "END", "value": payload},
+                    },
+                }
+            )
         if _is_cohere(self.model_id):
             return json.dumps(
                 {
@@ -271,6 +310,13 @@ class BedrockEmbedder:
         )
 
     def _parse_response(self, body: dict[str, Any]) -> list[float]:
+        if _is_nova_embed(self.model_id):
+            # {"embeddings": [{"embeddingType": "TEXT", "embedding": [...]}]}
+            items = body.get("embeddings")
+            vector = items[0].get("embedding") if isinstance(items, list) and items else None
+            if not vector:
+                raise ValueError(f"No Nova embedding in response: keys={list(body.keys())}")
+            return _l2_normalise(vector)
         if _is_cohere(self.model_id):
             # {"embeddings": {"float": [[...]]}}
             floats = body.get("embeddings", {}).get("float")
@@ -298,15 +344,15 @@ class BedrockEmbedder:
         """Best-effort input-token count for one embedded text.
 
         Titan returns ``inputTextTokenCount`` in the response body — use it when
-        present. Cohere embed-v4 returns NO token count, so estimate from the
-        (already char-capped) input text.
+        present. Cohere embed-v4 and Nova return NO token count, so estimate from
+        the (already char-capped) input text.
         """
         titan_count = body.get("inputTextTokenCount")
         # Accept any real number but reject bool (isinstance(True, int) is True) and
         # coerce to int, so a float count (e.g. 12.0) is honoured instead of estimated.
         if isinstance(titan_count, (int, float)) and not isinstance(titan_count, bool):
             return int(titan_count)
-        # ponytail: 4-chars/token estimate for Cohere (no token count in response); good enough for cost signal
+        # ponytail: 4-chars/token estimate for Cohere/Nova (no token count in response); good enough for cost signal
         return max(1, math.ceil(len(text[:_MAX_INPUT_CHARS]) / 4))
 
     def _record_cost(self, texts: list[str], body: dict[str, Any]) -> None:
@@ -392,11 +438,11 @@ class BedrockEmbedder:
 
     # ── public API ──────────────────────────────────────────────────────
     def embed_document(self, text: str) -> list[float]:
-        """Embed indexable content (Cohere ``search_document``)."""
+        """Embed indexable content (Cohere ``search_document`` / Nova ``GENERIC_INDEX``)."""
         return self._embed(text, "document")
 
     def embed_query(self, text: str) -> list[float]:
-        """Embed a search query (Cohere ``search_query``)."""
+        """Embed a search query (Cohere ``search_query`` / Nova ``TEXT_RETRIEVAL``)."""
         return self._embed(text, "query")
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:

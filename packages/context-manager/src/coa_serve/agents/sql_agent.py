@@ -41,11 +41,14 @@ therefore not offered — see the note on ``invoke_async`` below.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
+from coa_common.model_limits import clamp_max_tokens
 
 from ..config import env_with_legacy_name
 from ..exceptions import AccessDeniedError
@@ -633,9 +636,15 @@ class SqlAgent:
             )
 
         # BedrockModel uses the same region as the serve LLM client + the request's model.
-        model_kwargs: dict[str, Any] = {"region_name": self._region, "max_tokens": _AGENT_MAX_TOKENS}
-        if self._model_id:
-            model_kwargs["model_id"] = self._model_id
+        # The request's override, else the deployment's serve LLM. Without the
+        # fallback, Strands used its own built-in default model (a Claude model),
+        # ignoring bedrockLlmModelId entirely.
+        model_id = self._model_id or os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_LLM_MODEL_ID
+        model_kwargs: dict[str, Any] = {
+            "region_name": self._region,
+            "model_id": model_id,
+            "max_tokens": clamp_max_tokens(model_id, _AGENT_MAX_TOKENS),
+        }
         # The graph tool is offered ONLY when one is wired: with no graph client the
         # agent sees the same four tools and the same prompt text as baseline.
         tools = [search_tables, get_table_schema, generate_sql, execute_sql]

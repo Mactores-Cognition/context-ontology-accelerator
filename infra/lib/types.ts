@@ -133,7 +133,8 @@ export interface SsmConfig {
    *  the SAME model — vectors from different models are not comparable — so
    *  this single key feeds them all. Changing it after data exists is a data
    *  migration; set it at initial deploy. Accepts geo inference profiles
-   *  (us./eu.) and bare in-region IDs. Defaults to us.cohere.embed-v4:0. */
+   *  (us./eu.) and bare in-region IDs. Defaults to
+   *  amazon.nova-2-multimodal-embeddings-v1:0 (DEFAULT_BEDROCK_MODEL_ID). */
   readonly bedrockEmbedModelId?: string;
 
   /** Embedding vector dimension for the model above. Baked into the OpenSearch
@@ -141,16 +142,16 @@ export interface SsmConfig {
    *  initial deploy alongside the model ID. Defaults to 1024. */
   readonly bedrockEmbedDimensions?: number;
 
-  /** Bedrock LLM model ID for ontology induction, grounding rerank, and
-   *  description generation (ontology-engine LLM_MODEL_ID /
-   *  DESCRIPTION_LLM_MODEL_ID). Defaults to us.anthropic.claude-sonnet-5
+  /** Bedrock LLM model ID for ontology induction and description
+   *  generation (ontology-engine LLM_MODEL_ID /
+   *  DESCRIPTION_LLM_MODEL_ID). Defaults to us.amazon.nova-pro-v1:0
    *  (DEFAULT_BEDROCK_INDUCTION_MODEL_ID). */
   readonly bedrockInductionLlmModelId?: string;
 
   /** Bedrock chat/completion model ID for source enrichment, constraint
-   *  inference, and document KG extraction (the shared BedrockClient default
-   *  and the doc-ingestion inference-profile ARN). Defaults to
-   *  us.anthropic.claude-haiku-4-5-20251001-v1:0. */
+   *  inference, grounding rerank, and document KG extraction (the shared
+   *  BedrockClient default and the doc-ingestion inference-profile ARN).
+   *  Defaults to us.amazon.nova-pro-v1:0 (DEFAULT_BEDROCK_CHAT_MODEL_ID). */
   readonly bedrockChatModelId?: string;
 
   /** Model IDs allowed for per-request override via options.modelId.

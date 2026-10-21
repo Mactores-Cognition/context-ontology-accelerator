@@ -16,6 +16,7 @@ import boto3
 import structlog
 from botocore.exceptions import ClientError
 from coa_common import resolve_region, sync_boto_config
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 
 logger = structlog.get_logger(__name__)
 
@@ -318,7 +319,7 @@ def load_config() -> ServiceConfig:
         vkg_endpoint=os.environ.get("VKG_ENDPOINT", "http://vkg.local:8080"),
         neptune_endpoint=os.environ.get("NEPTUNE_ENDPOINT", ""),
         opensearch_endpoint=os.environ.get("OPENSEARCH_ENDPOINT", ""),
-        bedrock_model_id=os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5"),
+        bedrock_model_id=os.environ.get("BEDROCK_MODEL_ID", DEFAULT_LLM_MODEL_ID),
         bedrock_region=os.environ.get("BEDROCK_REGION", resolve_region()),
         data_sources_table=os.environ.get("DATA_SOURCES_TABLE", ""),
         metric_definitions_table=os.environ.get("METRIC_DEFINITIONS_TABLE", ""),

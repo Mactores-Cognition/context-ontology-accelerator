@@ -27,7 +27,7 @@ import structlog
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from coa_common import BedrockEmbedder, resolve_region
-from coa_common.constants import DEFAULT_EMBED_MODEL_ID
+from coa_common.constants import DEFAULT_EMBED_MODEL_ID, DEFAULT_LLM_MODEL_ID
 from coa_common.guardrail_metrics import (
     COMPONENT_NL_TO_SPARQL,
     DECISION_ALLOW,
@@ -39,6 +39,7 @@ from coa_common.guardrail_metrics import (
     emit_guardrail_decision,
     filter_type_from_assessments,
 )
+from coa_common.model_limits import clamp_max_tokens
 
 from .base import (
     STOP_REASON_MAX_TOKENS,
@@ -320,14 +321,14 @@ class BedrockLLMClient:
 
         Args:
             model_id: Converse model id. Defaults to the ``BEDROCK_MODEL_ID`` env
-                var, then a built-in Claude Sonnet default.
+                var, then ``coa_common.constants.DEFAULT_LLM_MODEL_ID``.
             embed_model_id: Embedding model id. Defaults to ``BEDROCK_EMBED_MODEL_ID``
                 then ``DEFAULT_EMBED_MODEL_ID``.
             region: AWS region. Defaults to ``BEDROCK_REGION`` then the resolved region.
             guardrail_version: Guardrail version to apply. Defaults to
                 ``BEDROCK_GUARDRAIL_VERSION`` then ``"DRAFT"``.
         """
-        self._model_id = model_id or os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-5")
+        self._model_id = model_id or os.environ.get("BEDROCK_MODEL_ID", DEFAULT_LLM_MODEL_ID)
         self._embed_model_id = embed_model_id or os.environ.get("BEDROCK_EMBED_MODEL_ID", DEFAULT_EMBED_MODEL_ID)
         self._region = region or os.environ.get("BEDROCK_REGION", resolve_region())
         # Query embeddings go through the shared embedder so serve uses the SAME
@@ -743,7 +744,9 @@ class BedrockLLMClient:
                     raise
                 if "inferenceConfig" not in kwargs:
                     raise
-                msg = str(e)
+                # Lower-cased, and topP matched in each spelling providers use
+                # ("top_p" from Anthropic, "topP"/"top p" elsewhere).
+                msg = str(e).lower()
                 if "temperature" in msg and "temperature" in inference:
                     inference.pop("temperature", None)
                     if model_id is not None:
@@ -754,7 +757,7 @@ class BedrockLLMClient:
                         had_top_p="topP" in inference,
                     )
                     continue
-                if "top_p" in msg and "topP" in inference:
+                if any(t in msg for t in ("top_p", "topp", "top p")) and "topP" in inference:
                     inference.pop("topP", None)
                     if model_id is not None:
                         _MODELS_REJECTING_TOP_P.add(model_id)
@@ -837,7 +840,10 @@ class BedrockLLMClient:
             "modelId": effective_model_id,
             "messages": [{"role": "user", "content": content}],
             "inferenceConfig": {
-                "maxTokens": max_tokens,
+                # Capped at the model's output ceiling (e.g. Nova Pro 10K); a larger
+                # budget (TIER3_SYNTH_MAX_TOKENS allows up to 64000) is otherwise a
+                # ValidationException on such models.
+                "maxTokens": clamp_max_tokens(effective_model_id, max_tokens),
                 **({"temperature": temperature} if temperature is not None else {}),
                 **({"topP": top_p} if top_p is not None else {}),
             },

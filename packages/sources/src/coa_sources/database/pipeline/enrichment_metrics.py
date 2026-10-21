@@ -14,16 +14,13 @@ import json
 import logging
 
 from botocore.exceptions import ClientError
-from coa_common.bedrock import BedrockTruncationError
+from coa_common.bedrock import DEFAULT_MODEL_ID, BedrockTruncationError
+from coa_common.bedrock_metrics import cost_for
 
 from coa_sources.database.metrics import emit_metric
 
 logger = logging.getLogger(__name__)
 
-# TODO hardcoding for now, if there is a better way we can change it
-# Claude Haiku 4.5 pricing (us-east-1, per token)
-_BEDROCK_INPUT_COST_PER_TOKEN = 1.00 / 1_000_000  # $1.00 per 1M input tokens
-_BEDROCK_OUTPUT_COST_PER_TOKEN = 5.00 / 1_000_000  # $5.00 per 1M output tokens
 
 _THROTTLE_CODES = {"ThrottlingException", "TooManyRequestsException"}
 _VALIDATION_CODES = {"ValidationException", "ModelNotReadyException"}
@@ -69,8 +66,15 @@ def _resolve_engine(source_item: dict) -> str:
 class BedrockTokenUsageCounter:
     """Tracks cumulative Bedrock token usage for cost estimation."""
 
-    def __init__(self) -> None:
-        """Initialize the running input/output token totals to zero."""
+    def __init__(self, model_id: str = DEFAULT_MODEL_ID) -> None:
+        """Initialize the running input/output token totals to zero.
+
+        Args:
+            model_id: Model the calls are billed against. Defaults to the
+                enrichment model (``BEDROCK_CHAT_MODEL_ID``); priced through
+                ``coa_common.bedrock_metrics.cost_for`` instead of fixed rates.
+        """
+        self.model_id = model_id
         self.input_tokens = 0
         self.output_tokens = 0
 
@@ -86,10 +90,8 @@ class BedrockTokenUsageCounter:
 
     @property
     def estimated_calls_cost_usd(self) -> float:
-        """Estimated USD cost of all recorded calls at the configured token rates."""
-        return (self.input_tokens * _BEDROCK_INPUT_COST_PER_TOKEN) + (
-            self.output_tokens * _BEDROCK_OUTPUT_COST_PER_TOKEN
-        )
+        """Estimated USD cost of all recorded calls at the enrichment model's rates."""
+        return cost_for(self.model_id, self.input_tokens, self.output_tokens)
 
 
 class EnrichmentMetricEmitter:

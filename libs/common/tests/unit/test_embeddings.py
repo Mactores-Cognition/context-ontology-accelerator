@@ -117,6 +117,67 @@ class TestTitan:
             self._embedder(client).embed_document("x")
 
 
+NOVA = "amazon.nova-2-multimodal-embeddings-v1:0"
+
+
+class TestNovaMultimodal:
+    def _embedder(self, client: MagicMock, dimensions: int = 1024) -> BedrockEmbedder:
+        e = BedrockEmbedder(model_id=NOVA, dimensions=dimensions)
+        e._client = client
+        return e
+
+    @staticmethod
+    def _response(vector: list[float]) -> dict:
+        return {"embeddings": [{"embeddingType": "TEXT", "embedding": vector}]}
+
+    def test_is_the_default_model(self, monkeypatch):
+        monkeypatch.delenv("BEDROCK_EMBED_MODEL_ID", raising=False)
+        assert BedrockEmbedder().model_id == NOVA
+
+    def test_document_request_schema(self):
+        client = _mock_bedrock(self._response([0.5] * 1024))
+        vec = self._embedder(client).embed_document("supplier table")
+        body = _sent_body(client)
+        assert body["taskType"] == "SINGLE_EMBEDDING"
+        params = body["singleEmbeddingParams"]
+        assert params["embeddingPurpose"] == "GENERIC_INDEX"
+        assert params["embeddingDimension"] == 1024
+        assert params["text"] == {"truncationMode": "END", "value": "supplier table"}
+        assert len(vec) == 1024
+
+    def test_query_uses_text_retrieval_purpose(self):
+        client = _mock_bedrock(self._response([0.5] * 4))
+        self._embedder(client, dimensions=256).embed_query("which suppliers are on hold?")
+        assert _sent_body(client)["singleEmbeddingParams"]["embeddingPurpose"] == "TEXT_RETRIEVAL"
+
+    def test_vectors_are_l2_normalised(self):
+        client = _mock_bedrock(self._response([3.0, 4.0]))
+        assert self._embedder(client, dimensions=256).embed_document("x") == pytest.approx([0.6, 0.8])
+
+    def test_unsupported_dimension_fails_at_construction(self):
+        with pytest.raises(ValueError, match="supports dimensions"):
+            BedrockEmbedder(model_id=NOVA, dimensions=512)
+
+    def test_raises_when_no_embedding(self):
+        client = _mock_bedrock({"embeddings": []})
+        with pytest.raises(ValueError, match="Nova"):
+            self._embedder(client).embed_document("x")
+
+    def test_embed_documents_fans_out_one_text_per_call(self):
+        client = MagicMock()
+        client.invoke_model.side_effect = lambda **_: {
+            "body": MagicMock(read=MagicMock(return_value=json.dumps(self._response([1.0, 0.0])).encode()))
+        }
+        vecs = self._embedder(client, dimensions=256).embed_documents(["a", "b", "c"])
+        assert len(vecs) == 3
+        assert client.invoke_model.call_count == 3
+        assert all("texts" not in _sent_body_of(c) for c in client.invoke_model.call_args_list)
+
+
+def _sent_body_of(call) -> dict:
+    return json.loads(call.kwargs["body"])
+
+
 class TestIsCohereV4:
     @pytest.mark.parametrize(
         ("model_id", "expected"),

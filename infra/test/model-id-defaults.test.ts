@@ -40,7 +40,19 @@ describe("model-id defaults agree across TypeScript, Python and preflight", () =
       `_DEFAULT_${name}_MODEL_ID in preflight-deploy.sh`,
     );
 
-  it("serve query LLM: ts-shared = coa_serve config.py = coa_serve clients/bedrock.py = preflight", () => {
+  const constantsPy = read("libs", "common", "src", "coa_common", "constants.py");
+  // Every Python text-LLM fallback reads this one constant (no per-file literals).
+  const pythonLlmDefault = match(
+    constantsPy,
+    /^DEFAULT_LLM_MODEL_ID:\s*str\s*=\s*"([^"]+)"/m,
+    "DEFAULT_LLM_MODEL_ID in coa_common/constants.py",
+  );
+  const fallsBackToConstant = (source: string, envVar: string) =>
+    new RegExp(
+      `os\\.(?:environ\\.get|getenv)\\("${envVar}",\\s*DEFAULT_LLM_MODEL_ID\\)`,
+    ).test(source);
+
+  it("serve query LLM: ts-shared = coa_common DEFAULT_LLM_MODEL_ID (config.py, clients/bedrock.py) = preflight", () => {
     const configPy = read(
       "packages",
       "context-manager",
@@ -56,28 +68,13 @@ describe("model-id defaults agree across TypeScript, Python and preflight", () =
       "clients",
       "bedrock.py",
     );
-    const literal = /os\.environ\.get\("BEDROCK_MODEL_ID",\s*"([^"]+)"\)/;
-    expect(
-      match(configPy, literal, "BEDROCK_MODEL_ID default in config.py"),
-    ).toBe(DEFAULT_BEDROCK_LLM_MODEL_ID);
-    expect(
-      match(
-        clientPy,
-        literal,
-        "BEDROCK_MODEL_ID default in clients/bedrock.py",
-      ),
-    ).toBe(DEFAULT_BEDROCK_LLM_MODEL_ID);
+    expect(pythonLlmDefault).toBe(DEFAULT_BEDROCK_LLM_MODEL_ID);
+    expect(fallsBackToConstant(configPy, "BEDROCK_MODEL_ID")).toBe(true);
+    expect(fallsBackToConstant(clientPy, "BEDROCK_MODEL_ID")).toBe(true);
     expect(preflightDefault("LLM")).toBe(DEFAULT_BEDROCK_LLM_MODEL_ID);
   });
 
   it("embedding model: ts-shared = coa_common.constants.DEFAULT_EMBED_MODEL_ID = preflight", () => {
-    const constantsPy = read(
-      "libs",
-      "common",
-      "src",
-      "coa_common",
-      "constants.py",
-    );
     expect(
       match(
         constantsPy,
@@ -90,20 +87,22 @@ describe("model-id defaults agree across TypeScript, Python and preflight", () =
 
   it("chat model: ts-shared = coa_common.bedrock.FALLBACK_CHAT_MODEL_ID = preflight", () => {
     const bedrockPy = read("libs", "common", "src", "coa_common", "bedrock.py");
-    expect(
-      match(
-        bedrockPy,
-        /^FALLBACK_CHAT_MODEL_ID\s*=\s*"([^"]+)"/m,
-        "FALLBACK_CHAT_MODEL_ID",
-      ),
-    ).toBe(DEFAULT_BEDROCK_CHAT_MODEL_ID);
+    expect(bedrockPy).toMatch(/^FALLBACK_CHAT_MODEL_ID\s*=\s*DEFAULT_LLM_MODEL_ID$/m);
+    expect(pythonLlmDefault).toBe(DEFAULT_BEDROCK_CHAT_MODEL_ID);
     expect(preflightDefault("CHAT")).toBe(DEFAULT_BEDROCK_CHAT_MODEL_ID);
   });
 
-  it("induction model: ts-shared = preflight", () => {
-    // The ontology-engine container always receives LLM_MODEL_ID from the
-    // stack, so there is no Python fallback to pin here (its in-process
-    // fallback is a different, older id — tracked separately).
+  it("induction model: ts-shared = ontology-engine main.py fallback = preflight", () => {
+    const mainPy = read(
+      "packages",
+      "ontology-engine",
+      "src",
+      "coa_ontology",
+      "main.py",
+    );
+    expect(fallsBackToConstant(mainPy, "LLM_MODEL_ID")).toBe(true);
+    expect(fallsBackToConstant(mainPy, "DESCRIPTION_LLM_MODEL_ID")).toBe(true);
+    expect(pythonLlmDefault).toBe(DEFAULT_BEDROCK_INDUCTION_MODEL_ID);
     expect(preflightDefault("INDUCTION")).toBe(
       DEFAULT_BEDROCK_INDUCTION_MODEL_ID,
     );

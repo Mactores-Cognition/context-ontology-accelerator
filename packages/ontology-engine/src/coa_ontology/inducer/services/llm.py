@@ -10,6 +10,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from coa_common import async_boto_config
 from coa_common.bedrock import extract_text_blocks
 from coa_common.bedrock_metrics import CostTracker
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 
 from coa_ontology.inducer.services.grounding import _BEDROCK_MAX_POOL_CONNECTIONS
 
@@ -30,7 +31,7 @@ class LLMClient:
 
     def __init__(
         self,
-        model_id: str = "us.anthropic.claude-sonnet-4-6",
+        model_id: str = DEFAULT_LLM_MODEL_ID,
         region: str = "us-east-1",
         cost_tracker: CostTracker | None = None,
     ):

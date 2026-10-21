@@ -286,18 +286,38 @@ EXTRACTION_DEFAULTS: dict[str, object] = {
 # Every embedding producer (ontology induction, doc-kg-build ingestion, metric
 # onboarding) and consumer (serve Tier-1/2/3 retrieval) MUST use the SAME model,
 # or vectors are cross-model incomparable and retrieval degrades silently to
-# noise (cosine of orthogonal vectors ≈ 0). Cohere Embed v4 is the canonical
-# choice, aligning serve with the graphrag-toolkit default lineage.
+# noise (cosine of orthogonal vectors ≈ 0).
 #
-# NOTE: cohere.embed-v4:0 does NOT support on-demand throughput on Bedrock — it
-# must be invoked via an inference profile (the ``us.`` prefix). Both the direct
-# invoke path (BedrockEmbedder) and the LlamaIndex/graphrag path accept this
-# 3-part "region.provider.model" id.
+# Amazon Nova Multimodal Embeddings, because Cohere Embed is not offered in the
+# target GovCloud region. It is IN-REGION ONLY (no geo/global inference profile)
+# and published in us-east-1 and us-gov-west-1, so the bare model id works in
+# both; a deployment in any other region must set ``bedrockEmbedModelId``.
+# Supported dimensions: 256 / 384 / 1024 / 3072 (1024 keeps the index size).
+# Must stay in step with libs/ts-shared/src/constants.ts DEFAULT_BEDROCK_MODEL_ID.
 #
 # Changing the model is also a DATA MIGRATION: all existing indexes were written
 # with the prior model and must be re-embedded/re-ingested, else retrieval breaks.
-DEFAULT_EMBED_MODEL_ID: str = "us.cohere.embed-v4:0"
+DEFAULT_EMBED_MODEL_ID: str = "amazon.nova-2-multimodal-embeddings-v1:0"
 DEFAULT_EMBED_DIMENSIONS: int = 1024
+
+
+# ---------------------------------------------------------------------------
+# Text LLM — SINGLE PYTHON SOURCE OF TRUTH for the built-in default
+# ---------------------------------------------------------------------------
+# Default for every LLM role when the deployment sets no model id: the serve
+# query LLM (BEDROCK_MODEL_ID), ontology induction / description generation
+# (LLM_MODEL_ID, DESCRIPTION_LLM_MODEL_ID) and the chat role for enrichment,
+# constraint inference, document extraction and grounding rerank
+# (BEDROCK_CHAT_MODEL_ID). Amazon Nova Pro, because Anthropic models are not
+# approved for the target GovCloud deployment.
+#
+# The ``us.`` geo profile is only invocable from US commercial regions. Nova Pro
+# has NO GovCloud profile: a us-gov-west-1 deployment must set the bare
+# in-region id ``amazon.nova-pro-v1:0`` in the SSM deploy config.
+#
+# Must stay in step with libs/ts-shared/src/constants.ts
+# (infra/test/model-id-defaults.test.ts pins the two together).
+DEFAULT_LLM_MODEL_ID: str = "us.amazon.nova-pro-v1:0"
 
 
 # ---------------------------------------------------------------------------

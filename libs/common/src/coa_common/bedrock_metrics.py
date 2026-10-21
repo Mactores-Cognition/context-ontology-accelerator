@@ -61,6 +61,13 @@ _PRICING: dict[str, dict[str, float]] = {
         "input": 0.02 / 1_000_000,
         "output": 0.0,
     },
+    # Nova Multimodal Embeddings, text input: AWS Price List API (AmazonBedrock,
+    # us-east-1, usage type USE1-NovaMultiModalEmbeddings-input-tokens, on-demand
+    # $0.000135 per 1K tokens) read 2026-10-21.
+    "amazon.nova-2-multimodal-embeddings-v1:0": {
+        "input": 0.135 / 1_000_000,
+        "output": 0.0,
+    },
     # Amazon Nova text models. Rates read from the AWS Price List API
     # (AmazonBedrock / us-east-1, on-demand "*-input-tokens" / "*-output-tokens"
     # usage types, price-list version 20260723233555) on 2026-07-29. Keyed by the
@@ -83,11 +90,13 @@ _PRICING: dict[str, dict[str, float]] = {
 
 # ponytail: family-prefix fallback so a model-version bump doesn't silently zero out cost.
 # Substring (matched case-insensitively against the model id) → pricing dict. Values reference
-# the same dict objects as _PRICING so the rates are never duplicated. Cohere embed is the
-# embed default because it is the primary embedding model in this stack.
+# the same dict objects as _PRICING so the rates are never duplicated. Nova Multimodal
+# Embeddings (the default embedding model) is matched before the generic "embed" key,
+# which keeps the Cohere rate for any other embedding id.
 _PRICING_FAMILY: dict[str, dict[str, float]] = {
     "sonnet": _PRICING["us.anthropic.claude-sonnet-5"],
     "haiku": _PRICING["us.anthropic.claude-haiku-4-5-20251001-v1:0"],
+    "multimodal-embeddings": _PRICING["amazon.nova-2-multimodal-embeddings-v1:0"],
     "embed": _PRICING["us.cohere.embed-v4:0"],
     # Nova families are per-variant (rates differ ~40x across the line, so a single
     # "nova" key would badly misprice). Premier is listed before Pro so the more

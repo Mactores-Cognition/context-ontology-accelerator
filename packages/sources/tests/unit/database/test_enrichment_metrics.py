@@ -94,7 +94,13 @@ class TestBedrockTokenUsageCounter:
 
     def test_estimated_cost_calculation(self) -> None:
         counter = BedrockTokenUsageCounter()
-        # 1M input tokens = $1.00, 1M output tokens = $5.00
+        # Default enrichment model is Nova Pro: $0.80 per 1M input, $3.20 per 1M output
+        counter.record_call(1_000_000, 1_000_000)
+
+        assert counter.estimated_calls_cost_usd == pytest.approx(4.00)
+
+    def test_estimated_cost_follows_the_configured_model(self) -> None:
+        counter = BedrockTokenUsageCounter(model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0")
         counter.record_call(1_000_000, 1_000_000)
 
         assert counter.estimated_calls_cost_usd == pytest.approx(6.00)
@@ -103,8 +109,8 @@ class TestBedrockTokenUsageCounter:
         counter = BedrockTokenUsageCounter()
         counter.record_call(1000, 500)
 
-        # 1000 * 1.00/1M + 500 * 5.00/1M = 0.001 + 0.0025 = 0.0035
-        assert counter.estimated_calls_cost_usd == pytest.approx(0.0035)
+        # 1000 * 0.80/1M + 500 * 3.20/1M = 0.0008 + 0.0016 = 0.0024
+        assert counter.estimated_calls_cost_usd == pytest.approx(0.0024)
 
 
 # ── _classify_bedrock_error ────────────────────────────────────────────────
@@ -256,11 +262,11 @@ class TestEnrichmentMetricEmitter:
         mock_emit.reset_mock()
         emitter.emit_enrichment_estimated_cost()
 
-        # 1000 * 1.00/1M + 500 * 5.00/1M = 0.001 + 0.0025 = 0.0035
+        # Nova Pro: 1000 * 0.80/1M + 500 * 3.20/1M = 0.0008 + 0.0016 = 0.0024
         mock_emit.assert_called_once()
         args = mock_emit.call_args[0]
         assert args[0] == "EnrichmentEstimatedCostUsd"
-        assert args[1] == pytest.approx(0.0035)
+        assert args[1] == pytest.approx(0.0024)
 
     @patch("coa_sources.database.pipeline.enrichment_metrics.emit_metric")
     def test_emit_enrichment_estimated_cost_zero_when_no_invocations(self, mock_emit) -> None:

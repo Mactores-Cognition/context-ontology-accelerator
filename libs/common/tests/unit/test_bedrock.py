@@ -51,7 +51,7 @@ class TestDefaultModelIdResolution:
     def test_falls_back_to_the_shared_default(self, monkeypatch):
         monkeypatch.delenv("BEDROCK_CHAT_MODEL_ID", raising=False)
         assert resolve_chat_model_id() == FALLBACK_CHAT_MODEL_ID
-        assert FALLBACK_CHAT_MODEL_ID == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        assert FALLBACK_CHAT_MODEL_ID == "us.amazon.nova-pro-v1:0"
 
     def test_empty_env_var_falls_back(self, monkeypatch):
         # An empty value is a misconfiguration, not a request for an empty model
@@ -113,7 +113,7 @@ class TestBedrockClient:
         assert result.output_tokens == 5
         assert result.latency_ms > 0
         mock_client.converse.assert_called_once_with(
-            modelId="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            modelId="us.amazon.nova-pro-v1:0",
             messages=[{"role": "user", "content": [{"text": "user"}]}],
             system=[{"text": "system"}],
             inferenceConfig={"maxTokens": 4096},
@@ -618,3 +618,53 @@ class TestGuardrailDecisionMetrics:
             mock_logger.info.side_effect = RuntimeError("stdout closed")
             mock_logger.warning.side_effect = RuntimeError("stdout closed")
             client.invoke("sys", "usr")
+
+
+@pytest.mark.unit
+class TestNovaCompatibility:
+    """Behaviour needed for Amazon Nova Pro: output ceiling and prose around JSON."""
+
+    @patch("coa_common.bedrock.boto3")
+    def test_invoke_caps_max_tokens_at_nova_pro_ceiling(self, mock_boto3):
+        mock_client = MagicMock()
+        mock_boto3.client.return_value = mock_client
+        mock_client.converse.return_value = {
+            "output": {"message": {"content": [{"text": "[]"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+        }
+        client = BedrockClient(region="us-east-1", model_id="amazon.nova-pro-v1:0")
+        client.invoke("system", "user", max_tokens=16384)
+
+        assert mock_client.converse.call_args[1]["inferenceConfig"] == {"maxTokens": 10_000}
+
+    @patch("coa_common.bedrock.boto3")
+    def test_invoke_parses_json_surrounded_by_prose(self, mock_boto3):
+        mock_client = MagicMock()
+        mock_boto3.client.return_value = mock_client
+        mock_client.converse.return_value = {
+            "output": {"message": {"content": [{"text": 'Here is the result:\n{"key": "value"}\nLet me know.'}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1},
+        }
+        client = BedrockClient(region="us-east-1")
+
+        assert client.invoke("system", "user").result == {"key": "value"}
+
+
+@pytest.mark.unit
+class TestParseJsonPayload:
+    def test_plain_fenced_and_prose_wrapped(self):
+        from coa_common.bedrock import parse_json_payload
+
+        assert parse_json_payload('{"a": 1}') == {"a": 1}
+        assert parse_json_payload('```json\n[{"a": 1}]\n```') == [{"a": 1}]
+        assert parse_json_payload("Sure! [1, 2] is the list.") == [1, 2]
+
+    def test_no_json_raises(self):
+        import json
+
+        from coa_common.bedrock import parse_json_payload
+
+        with pytest.raises(json.JSONDecodeError):
+            parse_json_payload("no structured content here")

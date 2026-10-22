@@ -7,6 +7,7 @@ import asyncio
 import uuid
 from datetime import datetime
 
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from coa_ontology.inducer.schemas import JobResponse, JobStatus
@@ -23,7 +24,7 @@ _jobs: dict[str, JobResponse] = {}
 def _build_pipeline(config: dict) -> DocumentPipeline:
     return DocumentPipeline(
         llm=LLMClient(
-            model_id=config.get("llm_model_id", "us.anthropic.claude-sonnet-4-6"),
+            model_id=config.get("llm_model_id", DEFAULT_LLM_MODEL_ID),
             region=config.get("llm_region", "us-east-1"),
         ),
         embedding_generator=EmbeddingGeneratorClient(config["embedding_generator_url"]),

@@ -41,6 +41,9 @@ def clean_env(monkeypatch):
         "LLM_REGION",
         "BEDROCK_REGION",
         "BEDROCK_EMBED_MODEL_ID",
+        "DESCRIPTION_LLM_MODEL_ID",
+        "GROUNDING_LLM_MODEL_ID",
+        "BEDROCK_CHAT_MODEL_ID",
     ):
         monkeypatch.delenv(var, raising=False)
     yield monkeypatch
@@ -86,3 +89,18 @@ class TestConfigOverrides:
         clean_env.setenv("LLM_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
         mod = _reload_main()
         assert mod.app.state.config["llm_model_id"] == "us.anthropic.claude-sonnet-4-6"
+
+    def test_llm_model_ids_default_to_shared_constant(self, clean_env):
+        from coa_common.constants import DEFAULT_LLM_MODEL_ID
+
+        mod = _reload_main()
+        cfg = mod.app.state.config
+        assert cfg["llm_model_id"] == DEFAULT_LLM_MODEL_ID
+        assert cfg["description_llm_model_id"] == DEFAULT_LLM_MODEL_ID
+        assert cfg["grounding_llm_model_id"] == DEFAULT_LLM_MODEL_ID
+
+    def test_grounding_model_follows_chat_model_then_explicit_override(self, clean_env):
+        clean_env.setenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
+        assert _reload_main().app.state.config["grounding_llm_model_id"] == "amazon.nova-pro-v1:0"
+        clean_env.setenv("GROUNDING_LLM_MODEL_ID", "some.rerank-model")
+        assert _reload_main().app.state.config["grounding_llm_model_id"] == "some.rerank-model"

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import graphrag_toolkit.lexical_graph.config as _graphrag_cfg
 import structlog
 from coa_common import make_llama_index_embedding, resolve_region
-from coa_common.constants import DEFAULT_EMBED_DIMENSIONS, DEFAULT_EMBED_MODEL_ID
+from coa_common.constants import DEFAULT_EMBED_DIMENSIONS, DEFAULT_EMBED_MODEL_ID, DEFAULT_LLM_MODEL_ID
 
 from ..step_ids import StepId
 from ..tier3.graph_traverser import GraphEntity
@@ -39,7 +39,10 @@ from .strategies import DEFAULT_SPEC, StrategySpec
 # Patching the module-level constants is the only reliable workaround.
 # TODO: Remove once graphrag-toolkit publishes a fix with active model defaults.
 # ---------------------------------------------------------------------------
-_ACTIVE_MODEL = os.environ.get("GRAPHRAG_LLM_MODEL", "us.anthropic.claude-sonnet-5")
+# Follows the deployment's serve LLM (BEDROCK_MODEL_ID) unless GRAPHRAG_LLM_MODEL
+# overrides it; no stack sets GRAPHRAG_LLM_MODEL, so before this it silently stayed
+# on a hard-coded Claude model whatever bedrockLlmModelId said.
+_ACTIVE_MODEL = os.environ.get("GRAPHRAG_LLM_MODEL") or os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_LLM_MODEL_ID
 _graphrag_cfg.DEFAULT_RESPONSE_MODEL = _ACTIVE_MODEL
 _graphrag_cfg.DEFAULT_EXTRACTION_MODEL = _ACTIVE_MODEL
 

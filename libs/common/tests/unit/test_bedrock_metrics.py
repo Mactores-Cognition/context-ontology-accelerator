@@ -21,6 +21,7 @@ pytestmark = pytest.mark.unit
 HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 SONNET = "us.anthropic.claude-sonnet-5"
 COHERE_EMBED = "us.cohere.embed-v4:0"
+NOVA_EMBED = "amazon.nova-2-multimodal-embeddings-v1:0"
 TITAN_EMBED = "amazon.titan-embed-text-v2:0"
 NOVA_LITE = "amazon.nova-lite-v1:0"
 NOVA_PRO = "amazon.nova-pro-v1:0"
@@ -615,3 +616,13 @@ class TestCloudwatchClientRegion:
         monkeypatch.setattr(bedrock_metrics, "resolve_region", lambda: "eu-central-1")
         bedrock_metrics._cloudwatch_client(None)
         assert captured["region"] == "eu-central-1"
+
+
+@pytest.mark.unit
+class TestNovaEmbeddingPricing:
+    def test_nova_embeddings_priced_from_price_list(self):
+        assert cost_for(NOVA_EMBED, 1_000_000, 0) == pytest.approx(0.135)
+
+    def test_nova_embeddings_arn_form_uses_nova_family_not_cohere(self):
+        arn = f"arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/{NOVA_EMBED}"
+        assert cost_for(arn, 1_000_000, 0) == pytest.approx(0.135)

@@ -1687,3 +1687,22 @@ class TestEnvStrListCap:
         monkeypatch.setenv("PREFERRED_ENTITY_CLASSIFICATIONS", _json.dumps(at_cap))
         m = mod_factory()
         assert len(m.PREFERRED_ENTITY_CLASSIFICATIONS) == MAX_VOCABULARY_ENTRIES
+
+
+class TestExtractionModel:
+    """KG extraction never falls through to graphrag-toolkit's built-in default
+    (a retired Claude model): ARN, then chat model, then the shared default."""
+
+    def test_prefers_trigger_arn(self, mod, monkeypatch):
+        monkeypatch.setattr(mod, "BEDROCK_MODEL_ARN", "arn:aws:bedrock:us-east-1::foundation-model/x")
+        monkeypatch.setenv("BEDROCK_CHAT_MODEL_ID", "chat.model")
+        assert mod._extraction_model() == "arn:aws:bedrock:us-east-1::foundation-model/x"
+
+    def test_falls_back_to_chat_model_then_shared_default(self, mod, monkeypatch):
+        from coa_common.constants import DEFAULT_LLM_MODEL_ID
+
+        monkeypatch.setattr(mod, "BEDROCK_MODEL_ARN", "")
+        monkeypatch.setenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")
+        assert mod._extraction_model() == "amazon.nova-pro-v1:0"
+        monkeypatch.delenv("BEDROCK_CHAT_MODEL_ID")
+        assert mod._extraction_model() == DEFAULT_LLM_MODEL_ID

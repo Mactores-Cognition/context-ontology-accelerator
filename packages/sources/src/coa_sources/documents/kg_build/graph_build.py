@@ -79,6 +79,7 @@ from coa_common.constants import (
     DEFAULT_ENABLE_VERSIONING,
     DEFAULT_EXTRACTION_MODE,
     DEFAULT_INFER_ENTITY_CLASSIFICATIONS,
+    DEFAULT_LLM_MODEL_ID,
     DEFAULT_PREFERRED_ENTITY_CLASSIFICATIONS_JSON,
     DEFAULT_PREFERRED_TOPICS_JSON,
     DEFAULT_USE_BATCH_INFERENCE,
@@ -91,6 +92,7 @@ from coa_common.constants import (
 from coa_common.dao import DynamoDBDAO
 from coa_common.embeddings import make_llama_index_embedding
 from coa_common.logging import setup_logging
+from coa_common.model_limits import clamp_max_tokens
 from coa_common.s3 import get_s3_client, list_objects, read_file_bytes
 from coa_control_plane_server.models.source_status import SourceStatus
 
@@ -228,6 +230,15 @@ CHECKPOINT_DIR = "/tmp/graphrag-checkpoints"
 # silently drops that chunk's trailing entities/statements. 16384 matches the
 # graphrag-toolkit benchmark harness. Env-overridable without a deploy.
 EXTRACTION_MAX_TOKENS = int(os.environ.get("EXTRACTION_MAX_TOKENS", "16384"))
+
+
+def _extraction_model() -> str:
+    """Return the KG extraction model: trigger ARN, else chat model, else default.
+
+    Never left unset: graphrag-toolkit's own fallback is a retired Claude model.
+    """
+    return BEDROCK_MODEL_ARN or os.environ.get("BEDROCK_CHAT_MODEL_ID") or DEFAULT_LLM_MODEL_ID
+
 
 # Vector indexes to build: ``chunk`` + ``topic``, matching the graphrag-toolkit
 # benchmark harness (benchmarks/ingest_v5.py, INDEX_NAMES = ['chunk', 'topic']).
@@ -727,16 +738,21 @@ def _setup_graphrag(tenant_id: str):
         model_id=BEDROCK_EMBED_MODEL_ID, dimensions=BEDROCK_EMBED_DIMENSIONS, region=AWS_REGION
     )
     GraphRAGConfig.embed_dimensions = BEDROCK_EMBED_DIMENSIONS
-    if BEDROCK_MODEL_ARN:
-        # Pass the extraction LLM as a JSON config, not a bare model string. The
-        # toolkit's GraphRAGConfig.to_llm() builds BedrockConverse with a hardcoded
-        # max_tokens=4096 for a bare string, and only reads max_tokens from the JSON
-        # form (config.py to_llm). 4096 output tokens truncates extraction on dense
-        # chunks — the model stops mid-response and the trailing entities/statements
-        # for that chunk are silently lost. 16384 matches the graphrag-toolkit
-        # benchmark harness (benchmarks/ingest_v5.py) for the same reason.
-        # temperature is 0.0 either way; region/profile still come from GraphRAGConfig.
-        GraphRAGConfig.extraction_llm = json.dumps({"model": BEDROCK_MODEL_ARN, "max_tokens": EXTRACTION_MAX_TOKENS})
+    # Always set (see _extraction_model): unset, the toolkit falls back to a retired Claude model.
+    # Pass the extraction LLM as a JSON config, not a bare model string. The
+    # toolkit's GraphRAGConfig.to_llm() builds BedrockConverse with a hardcoded
+    # max_tokens=4096 for a bare string, and only reads max_tokens from the JSON
+    # form (config.py to_llm). 4096 output tokens truncates extraction on dense
+    # chunks — the model stops mid-response and the trailing entities/statements
+    # for that chunk are silently lost. 16384 matches the graphrag-toolkit
+    # benchmark harness (benchmarks/ingest_v5.py) for the same reason.
+    # temperature is 0.0 either way; region/profile still come from GraphRAGConfig.
+    # max_tokens is capped at the model's output ceiling (Nova Pro: 10K), else
+    # every extraction request is a ValidationException on such models.
+    extraction_model = _extraction_model()
+    GraphRAGConfig.extraction_llm = json.dumps(
+        {"model": extraction_model, "max_tokens": clamp_max_tokens(extraction_model, EXTRACTION_MAX_TOKENS)}
+    )
     GraphRAGConfig.local_output_dir = CHECKPOINT_DIR
     if USE_BATCH_INFERENCE:
         GraphRAGConfig.extraction_batch_size = EXTRACTION_BATCH_SIZE
@@ -765,7 +781,7 @@ def _setup_graphrag(tenant_id: str):
         versioning=ENABLE_VERSIONING,
         proposition_extraction=ENABLE_PROPOSITION_EXTRACTION,
         delete_prev_versions=DELETE_PREV_VERSIONS,
-        bedrock_model=BEDROCK_MODEL_ARN or "(toolkit default)",
+        bedrock_model=_extraction_model(),
         extraction_max_tokens=EXTRACTION_MAX_TOKENS,
         chunk_size="256 (toolkit default)",
     )

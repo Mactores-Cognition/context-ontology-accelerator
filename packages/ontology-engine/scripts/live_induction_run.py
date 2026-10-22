@@ -231,6 +231,7 @@ def run_induction_direct(
     lexical graph); ``rigor_ontology`` deletes the scope by design, so pass a
     grounding-capable ``strategy`` when grounding is intended (#175).
     """
+    from coa_common.constants import DEFAULT_LLM_MODEL_ID
     from coa_ontology import induce_catalog
     from coa_ontology.bedrock_embeddings import BedrockEmbeddingClient
     from coa_ontology.inducer import schemas as inducer_schemas
@@ -263,7 +264,7 @@ def run_induction_direct(
         "embedding_generator_url": "",
         "ontology_catalog_url": "",
         "neptune_analytics_url": os.environ.get("NEPTUNE_ANALYTICS_URL", "http://localhost:9200"),
-        "llm_model_id": os.environ.get("LLM_MODEL_ID", "us.anthropic.claude-sonnet-4-6"),
+        "llm_model_id": os.environ.get("LLM_MODEL_ID", DEFAULT_LLM_MODEL_ID),
         "llm_region": os.environ.get("LLM_REGION", os.environ["AWS_REGION"]),
         "bedrock_region": os.environ["BEDROCK_REGION"],
         "bedrock_embed_model_id": os.environ["BEDROCK_EMBED_MODEL_ID"],

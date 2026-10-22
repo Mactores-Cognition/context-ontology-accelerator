@@ -16,9 +16,10 @@ import logging
 import os
 
 import defusedxml
+from coa_common import DEFAULT_EMBED_MODEL_ID
 
 # ── Workbench-specific ──────────────────────────────────────────────────
-from coa_common import DEFAULT_EMBED_MODEL_ID
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -148,9 +149,14 @@ app.state.config = {
     "data_catalog_url": os.getenv("DATA_CATALOG_URL", "http://localhost:8003"),
     "embedding_generator_url": os.getenv("EMBEDDING_GENERATOR_URL", _DEFAULT_ENGINE_SELF_URL),
     "ontology_catalog_url": os.getenv("ONTOLOGY_CATALOG_URL", _DEFAULT_ENGINE_SELF_URL),
-    "llm_model_id": os.getenv("LLM_MODEL_ID", "us.anthropic.claude-sonnet-4-6"),
+    "llm_model_id": os.getenv("LLM_MODEL_ID", DEFAULT_LLM_MODEL_ID),
     "llm_region": os.getenv("LLM_REGION", "us-east-1"),
-    "description_llm_model_id": os.getenv("DESCRIPTION_LLM_MODEL_ID", "us.anthropic.claude-sonnet-4-6"),
+    "description_llm_model_id": os.getenv("DESCRIPTION_LLM_MODEL_ID", DEFAULT_LLM_MODEL_ID),
+    # ENHANCED-grounding rerank (structured + unstructured). Previously never set,
+    # which left rerank on a hard-coded Claude Haiku; now the chat model unless overridden.
+    "grounding_llm_model_id": os.getenv("GROUNDING_LLM_MODEL_ID")
+    or os.getenv("BEDROCK_CHAT_MODEL_ID")
+    or DEFAULT_LLM_MODEL_ID,
     "description_mode": os.getenv("DESCRIPTION_MODE", "schema"),
     "neptune_analytics_url": os.getenv("NEPTUNE_ANALYTICS_URL", "http://localhost:9200"),
     "neptune_endpoint": os.getenv("NEPTUNE_ENDPOINT", os.getenv("NDB_ENDPOINT", "")),
@@ -185,7 +191,7 @@ def _make_description_llm_client(config: dict) -> LLMClient:
     future entailment LLM can run on different model versions.
     """
     return LLMClient(
-        model_id=config.get("description_llm_model_id", "us.anthropic.claude-sonnet-4-6"),
+        model_id=config.get("description_llm_model_id", DEFAULT_LLM_MODEL_ID),
         region=config.get("llm_region", "us-east-1"),
     )
 

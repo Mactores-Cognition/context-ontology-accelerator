@@ -74,10 +74,9 @@ describe("regionGeographies", () => {
 });
 
 describe("modelIdRegionConflict", () => {
-  // The #1020 report: every default is a us. profile, deployed to Tokyo.
+  // The #1020 report: the LLM defaults are us. profiles, deployed to Tokyo.
   it.each([
     DEFAULT_BEDROCK_LLM_MODEL_ID,
-    DEFAULT_BEDROCK_MODEL_ID,
     DEFAULT_BEDROCK_INDUCTION_MODEL_ID,
     DEFAULT_BEDROCK_CHAT_MODEL_ID,
   ])("flags the built-in default %s in ap-northeast-1", (id) => {
@@ -85,6 +84,26 @@ describe("modelIdRegionConflict", () => {
       /'us\.' inference profile, which Bedrock does not publish in ap-northeast-1/,
     );
   });
+
+  // The embedding default is a bare in-region id: no prefix to judge, so its
+  // published regions are listed explicitly.
+  it.each(["ap-northeast-1", "us-west-2", "eu-west-1"])(
+    "flags the in-region-only embedding default in %s",
+    (region) => {
+      expect(modelIdRegionConflict(DEFAULT_BEDROCK_MODEL_ID, region)).toMatch(
+        /is only published in-region in us-east-1, us-gov-west-1/,
+      );
+    },
+  );
+
+  it.each(["us-east-1", "us-gov-west-1"])(
+    "accepts the in-region-only embedding default in %s",
+    (region) => {
+      expect(
+        modelIdRegionConflict(DEFAULT_BEDROCK_MODEL_ID, region),
+      ).toBeUndefined();
+    },
+  );
 
   it.each([
     // The verified Tokyo workaround from #1020, plus the docs' example config.

@@ -150,9 +150,10 @@ by the deploy, see [Appendix A: AWS Service Inventory](#appendix-a-aws-service-i
 #### Bedrock model availability
 
 Availability of the *service* is not enough — the specific **foundation models must also be
-enabled in your region**, and the solution's default model IDs are **US cross-region inference
-profiles** (`us.anthropic.…`, `us.cohere.embed-v4:0`) that cannot be invoked from a non-US source
-region.
+enabled in your region**. The default text model is a **US cross-region inference profile**
+(`us.amazon.nova-pro-v1:0`) that cannot be invoked from a non-US source region, and the default
+embedding model (`amazon.nova-2-multimodal-embeddings-v1:0`) is **in-region only** and published in
+`us-east-1` and `us-gov-west-1` only.
 
 If you deploy outside the US, look each model up in
 [Regional availability by models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-region-compatibility.html)
@@ -162,13 +163,16 @@ or the bare in-region model ID. The models to check:
 
 | Model | Used for |
 |-------|----------|
-| Claude Sonnet 4.6 | Induction, grounding |
-| Claude Haiku 4.5 | Rerank, enrichment, document ingestion |
-| Claude Sonnet 5 | Serve query resolution (NL-to-SPARQL, synthesis) |
-| Cohere Embed v4 | All embeddings |
+| Amazon Nova Pro | Every text-LLM role: induction, grounding rerank, enrichment, document ingestion, serve query resolution (NL-to-SPARQL, synthesis) |
+| Amazon Nova Multimodal Embeddings | All embeddings (text only; 1024 dimensions by default) |
 
-Not every model offers every profile type in every region — Cohere Embed v4, for example, publishes
-only `us.` and `eu.` geographic profiles. Also
+Nova Pro returns at most 10K output tokens per call; the solution lowers any larger per-call budget
+to that ceiling automatically. Set the `BEDROCK_MAX_OUTPUT_TOKENS` environment variable on a service
+to apply a ceiling for a model the solution does not know.
+
+Not every model offers every profile type in every region — Nova Multimodal Embeddings, for example,
+publishes no geographic or global profile at all, so any region other than `us-east-1` or
+`us-gov-west-1` must set `bedrockEmbedModelId` to an embedding model available there. Also
 [request model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for
 each model in the deploy region, and note that `global.` profiles require
 [additional IAM/SCP permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)
@@ -184,11 +188,11 @@ exactly as it does today; outside the US the defaults are unusable (see the warn
 
 | Config key | Sets the model for | Default |
 |------------|--------------------|---------|
-| `bedrockLlmModelId` | Serve query LLM (NL-to-SPARQL, synthesis) | `us.anthropic.claude-sonnet-5` |
-| `bedrockEmbedModelId` | **All** embeddings — induction, doc-KG-build, metric matching, serve retrieval | `us.cohere.embed-v4:0` |
-| `bedrockEmbedDimensions` | Vector dimension for the embedding model above | `1024` |
-| `bedrockInductionLlmModelId` | Ontology induction, grounding rerank, description generation | `us.anthropic.claude-sonnet-5` |
-| `bedrockChatModelId` | Source enrichment, constraint inference, document-ingestion extraction | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `bedrockLlmModelId` | Serve query LLM (NL-to-SPARQL, synthesis) | `us.amazon.nova-pro-v1:0` |
+| `bedrockEmbedModelId` | **All** embeddings — induction, doc-KG-build, metric matching, serve retrieval | `amazon.nova-2-multimodal-embeddings-v1:0` |
+| `bedrockEmbedDimensions` | Vector dimension for the embedding model above (Nova: 256, 384, 1024 or 3072). Keep `1024` — serve and metric-service always use 1024 | `1024` |
+| `bedrockInductionLlmModelId` | Ontology induction, description generation | `us.amazon.nova-pro-v1:0` |
+| `bedrockChatModelId` | Source enrichment, constraint inference, grounding rerank, document-ingestion extraction | `us.amazon.nova-pro-v1:0` |
 
 Both **geographic inference profiles** (`us.`, `eu.`, `apac.`, `jp.`, `global.`) and **bare in-region model
 IDs** (e.g. `cohere.embed-v4:0`) are accepted — bare IDs matter because some models publish geo

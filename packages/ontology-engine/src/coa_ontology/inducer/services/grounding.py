@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -26,9 +27,10 @@ from dataclasses import dataclass
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from coa_common import async_boto_config
-from coa_common.bedrock import extract_text_blocks
+from coa_common import async_boto_config, resolve_region
+from coa_common.bedrock import extract_text_blocks, parse_json_payload
 from coa_common.bedrock_metrics import CostTracker
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 
 from coa_ontology.inducer.schemas import ConceptMatch, MatchCandidate
 
@@ -279,8 +281,8 @@ class GroundingService:
         self,
         ontology_catalog,
         embedding_generator,
-        llm_region: str = "us-east-1",
-        llm_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        llm_region: str | None = None,
+        llm_model_id: str | None = None,
         namespace: str | None = None,
         cost_tracker: CostTracker | None = None,
     ):
@@ -289,16 +291,26 @@ class GroundingService:
         Args:
             ontology_catalog: Client used to recall candidate foundational entities.
             embedding_generator: Client used to embed source concepts.
-            llm_region: AWS region for the Bedrock rerank client.
-            llm_model_id: Bedrock model id used to rerank candidates.
+            llm_region: AWS region for the Bedrock rerank client. Defaults to
+                ``LLM_REGION``, then the resolved deployment region.
+            llm_model_id: Bedrock model id used to rerank candidates. Defaults to
+                ``GROUNDING_LLM_MODEL_ID``, then the chat model
+                ``BEDROCK_CHAT_MODEL_ID``, then ``DEFAULT_LLM_MODEL_ID``. Callers
+                used to omit it, which pinned rerank to a hard-coded Claude Haiku
+                in us-east-1 whatever the deployment configured.
             namespace: Namespace whose per-namespace recall index to query; None uses
                 the default-namespace index.
             cost_tracker: Optional per-job Bedrock usage tracker for rerank calls.
         """
         self.oc = ontology_catalog
         self.eg = embedding_generator
-        self._llm_region = llm_region
-        self._llm_model_id = llm_model_id
+        self._llm_region = llm_region or os.environ.get("LLM_REGION") or resolve_region()
+        self._llm_model_id = (
+            llm_model_id
+            or os.environ.get("GROUNDING_LLM_MODEL_ID")
+            or os.environ.get("BEDROCK_CHAT_MODEL_ID")
+            or DEFAULT_LLM_MODEL_ID
+        )
         self._bedrock = None
         # Optional per-job Bedrock usage tracker. When present, every rerank
         # converse call records its token usage under the "rerank" stage.
@@ -939,10 +951,11 @@ class GroundingService:
             # Select the answer by block type, not position: a reasoning model
             # returns a reasoningContent block (no "text" key) before the answer.
             raw = extract_text_blocks(resp["output"]["message"]["content"]).strip()
-            # Parse JSON response; handle cases where the LLM wraps it in markdown.
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            result = json.loads(raw)
+            # Parse JSON; tolerates a markdown fence and prose around the object,
+            # which non-Claude models (e.g. Amazon Nova) add despite instructions.
+            result = parse_json_payload(raw)
+            if not isinstance(result, dict):
+                raise json.JSONDecodeError("rerank reply is not a JSON object", raw, 0)
             log.info(
                 "grounding_rerank table=%s choice=%s confidence=%.2f reason=%s",
                 table_name,

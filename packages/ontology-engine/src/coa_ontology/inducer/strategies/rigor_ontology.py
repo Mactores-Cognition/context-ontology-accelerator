@@ -25,7 +25,9 @@ import re
 
 import boto3
 from coa_common import async_boto_config
+from coa_common.bedrock import extract_text_blocks
 from coa_common.bedrock_metrics import CostTracker
+from coa_common.constants import DEFAULT_LLM_MODEL_ID
 from rdflib import OWL, RDF, RDFS, XSD, BNode, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import SKOS
 
@@ -186,7 +188,7 @@ class RigorOntologyStrategy(InductionStrategy):
         if not ontology_uri_prefix.endswith(("#", "/")):
             ontology_uri_prefix += "#"
         llm_client = self._get_llm_client(config)
-        model_id = config.get("llm_model_id", "us.anthropic.claude-sonnet-4-6")
+        model_id = config.get("llm_model_id", DEFAULT_LLM_MODEL_ID)
         provenance_base = ontology_uri_prefix.rstrip("#").rstrip("/") + "/provenance"
 
         # Order tables so referenced tables are generated first (FK deps)
@@ -555,7 +557,8 @@ class RigorOntologyStrategy(InductionStrategy):
             # generation, not rerank). No-op when no tracker was threaded in.
             if self._cost_tracker is not None:
                 self._cost_tracker.record_from_converse("generate", model_id, resp)
-            result = resp["output"]["message"]["content"][0]["text"]
+            # By block type, not position: a reasoning block can come first.
+            result = extract_text_blocks(resp["output"]["message"]["content"])
             log.info(
                 "RIGOR LLM: model=%s prompt_chars=%d response_chars=%d %.0fms",
                 model_id,

@@ -1393,13 +1393,32 @@ class TestRetiredModelPatch:
 
     def test_active_model_is_overridable_via_env(self):
         """``_ACTIVE_MODEL`` is sourced from ``GRAPHRAG_LLM_MODEL`` (overridable),
-        falling back to the active default when the env var is unset."""
+        then the serve LLM ``BEDROCK_MODEL_ID``, then the shared default."""
         import os
 
+        from coa_common.constants import DEFAULT_LLM_MODEL_ID
         from coa_serve.lexical.baseline_retriever import _ACTIVE_MODEL
 
-        expected = os.environ.get("GRAPHRAG_LLM_MODEL", "us.anthropic.claude-sonnet-5")
+        expected = os.environ.get("GRAPHRAG_LLM_MODEL") or os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_LLM_MODEL_ID
         assert expected == _ACTIVE_MODEL
+
+    def test_active_model_follows_serve_llm_when_graphrag_env_unset(self):
+        """With no ``GRAPHRAG_LLM_MODEL``, the retriever uses the deployment's serve
+        LLM (``BEDROCK_MODEL_ID``) instead of a hard-coded model."""
+        import importlib
+        import os
+        from unittest import mock as _patch
+
+        import coa_serve.lexical.baseline_retriever as br
+
+        env = {k: v for k, v in os.environ.items() if k != "GRAPHRAG_LLM_MODEL"}
+        env["BEDROCK_MODEL_ID"] = "amazon.nova-pro-v1:0"
+        try:
+            with _patch.patch.dict(os.environ, env, clear=True):
+                importlib.reload(br)
+                assert br._ACTIVE_MODEL == "amazon.nova-pro-v1:0"
+        finally:
+            importlib.reload(br)
 
     def test_env_override_changes_patched_constants_on_reimport(self):
         """Setting ``GRAPHRAG_LLM_MODEL`` and re-importing the module patches the

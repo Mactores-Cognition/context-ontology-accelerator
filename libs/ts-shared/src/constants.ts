@@ -159,44 +159,49 @@ export const DEFAULT_EVENT_BUS_NAME = "default";
 
 /**
  * Default Bedrock embedding model ID — MUST match the Python single source of
- * truth (coa_common.constants.DEFAULT_EMBED_MODEL_ID). Cohere
- * Embed v4 via an inference profile (on-demand unsupported). Producers
- * (induction, doc-kg-build, metrics) and consumers (serve retrieval) must all
- * use the same model, or vectors are cross-model incomparable.
+ * truth (coa_common.constants.DEFAULT_EMBED_MODEL_ID). Amazon Nova Multimodal
+ * Embeddings, because Cohere Embed is not offered in the target GovCloud
+ * region. In-region only (no geo/global profile), published in us-east-1 and
+ * us-gov-west-1; any other deploy region must set `bedrockEmbedModelId`.
+ * Producers (induction, doc-kg-build, metrics) and consumers (serve retrieval)
+ * must all use the same model, or vectors are cross-model incomparable.
  */
-export const DEFAULT_BEDROCK_MODEL_ID = "us.cohere.embed-v4:0";
+export const DEFAULT_BEDROCK_MODEL_ID = "amazon.nova-2-multimodal-embeddings-v1:0";
 
 /**
- * Default Bedrock chat/completion model ID — MUST match the Python single
- * source of truth (coa_common.bedrock.DEFAULT_MODEL_ID). Claude Haiku 4.5 via
- * an inference profile. Distinct from DEFAULT_BEDROCK_MODEL_ID, which is the
- * embedding model; every LLM text path (source enrichment, constraint
- * inference, translation) uses this one. Consumers that only observe the model
- * (e.g. AWS/Bedrock ModelId dashboard dimensions) go dark if this drifts from
- * the Python default, so the two must move together.
+ * Default Bedrock text model for every LLM role. Amazon Nova Pro, because
+ * Anthropic models are not approved for the target GovCloud deployment.
+ * MUST match the Python single source of truth
+ * (coa_common.constants.DEFAULT_LLM_MODEL_ID); `infra/test/model-id-defaults.test.ts`
+ * pins them together. The `us.` profile is US-commercial only: a us-gov-west-1
+ * deployment sets the bare in-region id `amazon.nova-pro-v1:0` for every LLM
+ * key in its SSM config (synth-time region validation fails otherwise).
  */
-export const DEFAULT_BEDROCK_CHAT_MODEL_ID =
-  "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+const DEFAULT_BEDROCK_TEXT_MODEL_ID = "us.amazon.nova-pro-v1:0";
 
 /**
- * Default Bedrock model ID for ontology induction, grounding rerank, and
- * description generation (ontology-engine LLM_MODEL_ID /
- * DESCRIPTION_LLM_MODEL_ID). Sonnet-class: induction quality gates on it, and
- * this tracks the same Sonnet generation the serve query LLM defaults to.
- * Overridable per deployment via the `bedrockInductionLlmModelId` SSM config
- * key (#94).
+ * Default Bedrock chat/completion model ID (`bedrockChatModelId`). Distinct
+ * from DEFAULT_BEDROCK_MODEL_ID, which is the embedding model; every LLM text
+ * path (source enrichment, constraint inference, translation, grounding
+ * rerank, document KG extraction) uses this one. Consumers that only observe
+ * the model (e.g. AWS/Bedrock ModelId dashboard dimensions) go dark if this
+ * drifts from the Python default, so the two must move together.
  */
-export const DEFAULT_BEDROCK_INDUCTION_MODEL_ID =
-  "us.anthropic.claude-sonnet-5";
+export const DEFAULT_BEDROCK_CHAT_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;
+
+/**
+ * Default Bedrock model ID for ontology induction and description generation
+ * (ontology-engine LLM_MODEL_ID / DESCRIPTION_LLM_MODEL_ID). Overridable per
+ * deployment via the `bedrockInductionLlmModelId` SSM config key (#94).
+ */
+export const DEFAULT_BEDROCK_INDUCTION_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;
 
 /**
  * Default Bedrock model ID for the serve query LLM (Tier-2/Tier-3 reasoning,
  * NL-to-SQL/SPARQL, synthesis). Configured per deployment via the
  * `bedrockLlmModelId` SSM config key; when that key is absent ServeStack sets
- * `BEDROCK_MODEL_ID` to this value. It MUST match the runtime fallback literals
- * in `coa_serve/config.py` / `coa_serve/clients/bedrock.py`
- * (`infra/test/model-id-defaults.test.ts` pins it). It
- * exists so synth-time region validation can reason about the *effective*
- * model id for a deployment that has no config at all (#1020).
+ * `BEDROCK_MODEL_ID` to this value. It exists so synth-time region validation
+ * can reason about the *effective* model id for a deployment that has no
+ * config at all (#1020).
  */
-export const DEFAULT_BEDROCK_LLM_MODEL_ID = "us.anthropic.claude-sonnet-5";
+export const DEFAULT_BEDROCK_LLM_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;

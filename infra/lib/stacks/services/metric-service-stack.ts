@@ -246,10 +246,11 @@ export class MetricServiceStack extends SCLStack {
     );
 
     // ── IAM: Bedrock (embedding generation) ────────────────────────
-    // The embed model is an inference profile (e.g. us.cohere.embed-v4:0) — grant
-    // the profile ARN AND the underlying cross-region foundation-model ARNs it
-    // fans out to (on-demand is unsupported, so a bare foundation-model ARN is
-    // insufficient).
+    // The embed model is either a bare in-region id (the default,
+    // amazon.nova-2-multimodal-embeddings-v1:0 -> foundation-model ARN) or an
+    // inference profile (e.g. us.cohere.embed-v4:0) — for a profile, grant the
+    // profile ARN AND the underlying cross-region foundation-model ARNs it fans
+    // out to.
     this.metricApiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["bedrock:InvokeModel"],

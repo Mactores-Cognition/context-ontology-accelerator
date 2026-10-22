@@ -167,6 +167,18 @@ class TestSqlAgentHappyPath:
         assert kwargs["max_tokens"] == 4096
 
     @pytest.mark.asyncio
+    async def test_without_override_the_configured_serve_llm_is_used(self, monkeypatch):
+        """No per-request override: the agent must use BEDROCK_MODEL_ID, not the
+        Strands library's own built-in default model."""
+        monkeypatch.setenv("BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
+        agent, _ = _build()
+
+        install_fake_strands(lambda tools: _generate_and_execute(tools))
+        await _run(agent)
+
+        assert strands_fake.last_agent.model.kwargs["model_id"] == "amazon.nova-pro-v1:0"
+
+    @pytest.mark.asyncio
     async def test_exec_timeout_is_applied_per_statement(self):
         agent, mocks = _build(exec_timeout_s=9)
 

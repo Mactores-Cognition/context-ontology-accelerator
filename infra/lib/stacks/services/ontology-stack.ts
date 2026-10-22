@@ -853,7 +853,9 @@ export class OntologyStack extends SCLStack {
     // coa_common.bedrock_metrics) is the default; the Claude rows (Sonnet base tier,
     // Haiku 4.5) price commercial deployments that override the model. Unlisted
     // models are priced at the Nova Pro rate.
-    const llmPricePer1K = (modelId: string): { input: number; output: number } => {
+    const llmPricePer1K = (
+      modelId: string,
+    ): { input: number; output: number } => {
       const id = modelId.toLowerCase();
       if (id.includes("claude") && id.includes("sonnet")) {
         return { input: 0.003, output: 0.015 };

@@ -23,6 +23,11 @@
  * pass, for the same reason `isInferenceProfileId` counts segments instead of
  * allow-listing geos: a newly launched geography must not need a code change
  * to deploy.
+ *
+ * One exception: a built-in default that is a bare in-region id has no prefix
+ * to judge, so the regions it is published in are listed in
+ * `IN_REGION_ONLY_DEFAULTS`. Without it, a deploy outside those regions passes
+ * synth and then fails on every embedding call.
  */
 
 import type { SsmConfig } from "../types";
@@ -187,13 +192,29 @@ export function regionGeographies(region: string): ReadonlySet<string> {
 }
 
 /**
+ * Built-in defaults that are in-region only (no geographic or global profile),
+ * with the regions Bedrock publishes them in. Only defaults belong here: a
+ * model the operator configures is theirs to check (preflight warns).
+ */
+const IN_REGION_ONLY_DEFAULTS: Readonly<Record<string, readonly string[]>> = {
+  // Nova Multimodal Embeddings: In-Region only, per the Bedrock regional
+  // availability table (checked 2026-10-21).
+  [DEFAULT_BEDROCK_MODEL_ID]: ["us-east-1", "us-gov-west-1"],
+};
+
+/**
  * Why `modelId` cannot be invoked from `region`, or undefined when nothing
- * contradicts. Only geography is judged (see the module comment).
+ * contradicts. Only geography is judged, plus the in-region-only defaults
+ * above (see the module comment).
  */
 export function modelIdRegionConflict(
   modelId: string,
   region: string,
 ): string | undefined {
+  const publishedIn = IN_REGION_ONLY_DEFAULTS[modelId];
+  if (publishedIn && !publishedIn.includes(region.toLowerCase())) {
+    return `'${modelId}' is only published in-region in ${publishedIn.join(", ")}, not in ${region}`;
+  }
   const geo = geoPrefixOf(modelId);
   if (geo === undefined) return undefined;
   if (regionGeographies(region).has(geo)) return undefined;

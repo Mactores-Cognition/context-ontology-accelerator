@@ -2021,6 +2021,177 @@ describe("SourcesStack", () => {
     });
   });
 
+  describe("State machine DynamoDB writes go through the in-VPC sfn-ddb-writer Lambda", () => {
+    // Step Functions' built-in DynamoDB tasks are called by the service from
+    // outside the VPC, so they never use the VPC's DynamoDB endpoint. Every
+    // write is a lambda:invoke of the writer instead, with the former task
+    // parameters (plus Operation) as the payload.
+    const WRITES: Record<string, "UpdateItem" | "DeleteItem"> = {
+      DbUpdateStatusDiscovering: "UpdateItem",
+      DbUpdateStatusEnriching: "UpdateItem",
+      DbUpdateStatusCompleted: "UpdateItem",
+      DbUpdateStatusFailed: "UpdateItem",
+      DbUpdateSourceStatusScanFailed: "UpdateItem",
+      DocUpdateStatusIngesting: "UpdateItem",
+      SourcesSavePreprocessingResults: "UpdateItem",
+      DocUpdateStatusCompleted: "UpdateItem",
+      DocUpdateStatusFailed: "UpdateItem",
+      DocUpdateStatusDeleteFailed: "UpdateItem",
+      SourcesDocDeleteDdbRecord: "DeleteItem",
+    };
+
+    const writerLogicalId = (): string => {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: {
+          FunctionName: Match.stringLikeRegexp(".*-sfn-ddb-writer$"),
+        },
+      });
+      const ids = Object.keys(fns);
+      expect(ids).toHaveLength(1);
+      return ids[0];
+    };
+
+    // The rendered ASL of every state machine, with each CloudFormation token
+    // in the Fn::Join replaced by "@<its JSON, quotes removed>@".
+    const allStates = (): Record<string, any> => {
+      const states: Record<string, any> = {};
+      const machines = template.findResources(
+        "AWS::StepFunctions::StateMachine",
+      );
+      for (const sm of Object.values(machines) as any[]) {
+        const def = sm.Properties.DefinitionString;
+        const text =
+          typeof def === "string"
+            ? def
+            : (def["Fn::Join"][1] as unknown[])
+                .map((p) =>
+                  typeof p === "string"
+                    ? p
+                    : `@${JSON.stringify(p).replace(/"/g, "")}@`,
+                )
+                .join("");
+        Object.assign(states, JSON.parse(text).States);
+      }
+      return states;
+    };
+
+    it("creates the writer Lambda in the VPC", () => {
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        FunctionName: Match.stringLikeRegexp(".*-sfn-ddb-writer$"),
+        Handler: "index.handler",
+        Runtime: "python3.12",
+        Architectures: ["arm64"],
+        VpcConfig: Match.objectLike({
+          SubnetIds: Match.anyValue(),
+          SecurityGroupIds: Match.anyValue(),
+        }),
+      });
+    });
+
+    it("no state uses the built-in DynamoDB integration", () => {
+      const definition = JSON.stringify(
+        Object.values(
+          template.findResources("AWS::StepFunctions::StateMachine"),
+        ),
+      );
+      expect(definition).not.toContain("states:::dynamodb:");
+    });
+
+    it("each of the 11 writes invokes the writer with the operation and discards the result", () => {
+      const writer = writerLogicalId();
+      const states = allStates();
+      for (const [name, operation] of Object.entries(WRITES)) {
+        const st = states[name];
+        expect(st).toBeDefined();
+        expect(st.Type).toBe("Task");
+        expect(st.Resource).toContain(":states:::lambda:invoke");
+        expect(st.Parameters.FunctionName).toContain(writer);
+        expect(st.Parameters.Payload.Operation).toBe(operation);
+        expect(st.Parameters.Payload.TableName).toMatch(/Table/);
+        expect(Object.keys(st.Parameters.Payload.Key).sort()).toEqual([
+          "PK",
+          "SK",
+        ]);
+        expect(st.ResultPath).toBeNull();
+        expect(st.Retry).toEqual([
+          {
+            ErrorEquals: [
+              "Lambda.ServiceException",
+              "Lambda.AWSLambdaException",
+              "Lambda.SdkClientException",
+              "Lambda.TooManyRequestsException",
+            ],
+            IntervalSeconds: 2,
+            MaxAttempts: 3,
+            BackoffRate: 2,
+          },
+        ]);
+      }
+    });
+
+    it("keeps the payload in DynamoDB typed form with substituted paths", () => {
+      const payload =
+        allStates().DbUpdateSourceStatusScanFailed.Parameters.Payload;
+      expect(payload.Key).toEqual({
+        PK: { "S.$": "States.Format('NS#{}', $.namespaceId)" },
+        SK: { "S.$": "States.Format('SRC#{}', $.sourceId)" },
+      });
+      expect(payload.UpdateExpression).toBe("SET #s = :s, #u = :u, #l = :l");
+      expect(payload.ExpressionAttributeValues).toEqual({
+        ":s": { S: "SCAN_FAILED" },
+        ":u": { "S.$": "$$.State.EnteredTime" },
+        ":l": { "S.$": "$.scanJobSK" },
+      });
+    });
+
+    it("state machine roles have no DynamoDB permissions", () => {
+      const machines = template.findResources(
+        "AWS::StepFunctions::StateMachine",
+      );
+      const roleIds = Object.values(machines).map(
+        (sm: any) => sm.Properties.RoleArn["Fn::GetAtt"][0],
+      );
+      expect(roleIds.length).toBeGreaterThanOrEqual(3);
+      const policies = template.findResources("AWS::IAM::Policy");
+      for (const p of Object.values(policies) as any[]) {
+        const roles = JSON.stringify(p.Properties.Roles ?? []);
+        if (!roleIds.some((id) => roles.includes(`"${id}"`))) continue;
+        expect(JSON.stringify(p.Properties.PolicyDocument)).not.toContain(
+          "dynamodb:",
+        );
+      }
+    });
+
+    it("grants the writer only UpdateItem (scan jobs, sources) and DeleteItem (sources)", () => {
+      const writer = writerLogicalId();
+      const fn = template.findResources("AWS::Lambda::Function")[writer];
+      const roleId = fn.Properties.Role["Fn::GetAtt"][0];
+      const statements = Object.values(
+        template.findResources("AWS::IAM::Policy"),
+      )
+        .filter((p: any) =>
+          JSON.stringify(p.Properties.Roles).includes(`"${roleId}"`),
+        )
+        .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+        .filter((s: any) => JSON.stringify(s.Action).includes("dynamodb:"));
+      const actionsOn = (table: RegExp): string[] =>
+        statements
+          .filter((s: any) => table.test(JSON.stringify(s.Resource)))
+          .flatMap((s: any) => [s.Action].flat())
+          .sort();
+      expect(actionsOn(/SourceScanJobsTable/)).toEqual(["dynamodb:UpdateItem"]);
+      expect(actionsOn(/"SourcesTable/)).toEqual([
+        "dynamodb:DeleteItem",
+        "dynamodb:UpdateItem",
+      ]);
+      expect(
+        statements.every((s: any) =>
+          /SourceScanJobsTable|"SourcesTable/.test(JSON.stringify(s.Resource)),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe("Scan timeout terminal state", () => {
     // Fix A: the DbEnrichment EcsRunTask carries a CATCHABLE per-task timeout
     // (States.Timeout) so an over-long enrichment routes through the error
@@ -2486,9 +2657,7 @@ describe("SourcesStack", () => {
         /sources-doc-trigger|documents-trigger|doc.*trigger/i,
       );
       const arn = JSON.stringify(env.BEDROCK_MODEL_ARN);
-      expect(arn).toContain(
-        "foundation-model/amazon.nova-pro-v1:0",
-      );
+      expect(arn).toContain("foundation-model/amazon.nova-pro-v1:0");
       expect(arn).not.toContain("inference-profile");
       // Empty account segment: ...:bedrock:<region>::foundation-model/...
       expect(arn).toContain("::foundation-model/");

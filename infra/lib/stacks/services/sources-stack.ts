@@ -1448,6 +1448,80 @@ export class SourcesStack extends SCLStack {
       }),
     );
 
+    // ── Step Functions DynamoDB writer ───────────────────────────────
+    // Step Functions' built-in DynamoDB tasks (states:::dynamodb:*) are called
+    // by the Step Functions service itself, outside the VPC, so they never use
+    // the VPC's DynamoDB endpoint. The scan and document pipelines invoke this
+    // Lambda instead: it runs in the VPC and makes the same UpdateItem /
+    // DeleteItem call, which then goes through the endpoint.
+    const sfnDdbWriterFn = new lambda.Function(this, "SfnDdbWriterFn", {
+      functionName: this.prefixed("sfn-ddb-writer"),
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(fromRoot("infra/lambda/sfn-ddb-writer")),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 128,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [lambdaSecurityGroup],
+    });
+    this.sourceScanJobsTable.grant(sfnDdbWriterFn, "dynamodb:UpdateItem");
+    this.sourcesTable.grant(
+      sfnDdbWriterFn,
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+    );
+
+    // A task that runs one DynamoDB write through the writer. The payload is
+    // what the built-in task sent as its parameters (values in DynamoDB's typed
+    // form) plus the operation; the result is discarded, as before.
+    const makeDdbWrite = (
+      id: string,
+      operation: "UpdateItem" | "DeleteItem",
+      table: dynamodb.ITable,
+      key: Record<string, tasks.DynamoAttributeValue>,
+      update?: {
+        updateExpression: string;
+        expressionAttributeNames: Record<string, string>;
+        expressionAttributeValues: Record<string, tasks.DynamoAttributeValue>;
+      },
+    ): tasks.LambdaInvoke => {
+      const typed = (values: Record<string, tasks.DynamoAttributeValue>) =>
+        Object.fromEntries(
+          Object.entries(values).map(([k, v]) => [k, v.toObject()]),
+        );
+      const task = new tasks.LambdaInvoke(this, id, {
+        lambdaFunction: sfnDdbWriterFn,
+        payload: sfn.TaskInput.fromObject({
+          Operation: operation,
+          TableName: table.tableName,
+          Key: typed(key),
+          ...(update && {
+            UpdateExpression: update.updateExpression,
+            ExpressionAttributeNames: update.expressionAttributeNames,
+            ExpressionAttributeValues: typed(update.expressionAttributeValues),
+          }),
+        }),
+        resultPath: sfn.JsonPath.DISCARD,
+        retryOnServiceExceptions: false,
+      });
+      // Retry Lambda service faults only, as DbDiscovery does. DynamoDB errors
+      // raised by the writer are not retried, as with the built-in task.
+      task.addRetry({
+        errors: [
+          "Lambda.ServiceException",
+          "Lambda.AWSLambdaException",
+          "Lambda.SdkClientException",
+          "Lambda.TooManyRequestsException",
+        ],
+        maxAttempts: 3,
+        backoffRate: 2,
+        interval: cdk.Duration.seconds(2),
+      });
+      return task;
+    };
+
     // ── Database Scan Pipeline Step Functions ────────────────────────
     // Scan job status updates go to source-scan-jobs table
     // PK = SRC#{sourceId}  (passed as scanJobPK from the trigger Lambda)
@@ -1455,10 +1529,12 @@ export class SourcesStack extends SCLStack {
     const makeDbStatusUpdate = (
       stepId: string,
       status: string,
-    ): tasks.DynamoUpdateItem =>
-      new tasks.DynamoUpdateItem(this, stepId, {
-        table: this.sourceScanJobsTable,
-        key: {
+    ): tasks.LambdaInvoke =>
+      makeDdbWrite(
+        stepId,
+        "UpdateItem",
+        this.sourceScanJobsTable,
+        {
           PK: tasks.DynamoAttributeValue.fromString(
             sfn.JsonPath.stringAt("$.scanJobPK"),
           ),
@@ -1466,36 +1542,34 @@ export class SourcesStack extends SCLStack {
             sfn.JsonPath.stringAt("$.scanJobSK"),
           ),
         },
-        updateExpression: "SET #s = :s, #u = :u",
-        expressionAttributeNames: { "#s": "status", "#u": "updatedAt" },
-        expressionAttributeValues: {
-          ":s": tasks.DynamoAttributeValue.fromString(status),
-          ":u": tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.stringAt("$$.State.EnteredTime"),
-          ),
+        {
+          updateExpression: "SET #s = :s, #u = :u",
+          expressionAttributeNames: { "#s": "status", "#u": "updatedAt" },
+          expressionAttributeValues: {
+            ":s": tasks.DynamoAttributeValue.fromString(status),
+            ":u": tasks.DynamoAttributeValue.fromString(
+              sfn.JsonPath.stringAt("$$.State.EnteredTime"),
+            ),
+          },
         },
-        resultPath: sfn.JsonPath.DISCARD,
-      });
+      );
 
     // Source record status update goes to sources table
     // PK = NS#{namespaceId}, SK = SRC#{sourceId}
     // datasourceId arrives as "DS#<uuid>" — strip the prefix to get the bare sourceId.
-    const dbUpdateSourceScanFailed = new tasks.DynamoUpdateItem(
-      this,
+    const dbUpdateSourceScanFailed = makeDdbWrite(
       "DbUpdateSourceStatusScanFailed",
+      "UpdateItem",
+      this.sourcesTable,
       {
-        table: this.sourcesTable,
-        key: {
-          PK: tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.format(
-              "NS#{}",
-              sfn.JsonPath.stringAt("$.namespaceId"),
-            ),
-          ),
-          SK: tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.format("SRC#{}", sfn.JsonPath.stringAt("$.sourceId")),
-          ),
-        },
+        PK: tasks.DynamoAttributeValue.fromString(
+          sfn.JsonPath.format("NS#{}", sfn.JsonPath.stringAt("$.namespaceId")),
+        ),
+        SK: tasks.DynamoAttributeValue.fromString(
+          sfn.JsonPath.format("SRC#{}", sfn.JsonPath.stringAt("$.sourceId")),
+        ),
+      },
+      {
         updateExpression: "SET #s = :s, #u = :u, #l = :l",
         expressionAttributeNames: {
           "#s": "status",
@@ -1511,7 +1585,6 @@ export class SourcesStack extends SCLStack {
             sfn.JsonPath.stringAt("$.scanJobSK"),
           ),
         },
-        resultPath: sfn.JsonPath.DISCARD,
       },
     );
 
@@ -2352,7 +2425,7 @@ export class SourcesStack extends SCLStack {
       id: string,
       status: string,
       opts?: { includeError?: boolean },
-    ): tasks.DynamoUpdateItem => {
+    ): tasks.LambdaInvoke => {
       const exprNames: Record<string, string> = {
         "#s": "status",
         "#u": "updatedAt",
@@ -2371,9 +2444,11 @@ export class SourcesStack extends SCLStack {
         );
         updateExpr += ", #e = :e";
       }
-      return new tasks.DynamoUpdateItem(this, id, {
-        table: this.sourcesTable,
-        key: {
+      return makeDdbWrite(
+        id,
+        "UpdateItem",
+        this.sourcesTable,
+        {
           PK: tasks.DynamoAttributeValue.fromString(
             sfn.JsonPath.format(
               "NS#{}",
@@ -2387,11 +2462,12 @@ export class SourcesStack extends SCLStack {
             ),
           ),
         },
-        updateExpression: updateExpr,
-        expressionAttributeNames: exprNames,
-        expressionAttributeValues: exprValues,
-        resultPath: sfn.JsonPath.DISCARD,
-      });
+        {
+          updateExpression: updateExpr,
+          expressionAttributeNames: exprNames,
+          expressionAttributeValues: exprValues,
+        },
+      );
     };
 
     const docUpdateIngesting = makeDocStatusUpdate(
@@ -2579,25 +2655,22 @@ export class SourcesStack extends SCLStack {
     });
     kgBuildTask.addCatch(docErrorChain, { resultPath: "$.error" });
 
-    const savePreprocessingResults = new tasks.DynamoUpdateItem(
-      this,
+    const savePreprocessingResults = makeDdbWrite(
       "SourcesSavePreprocessingResults",
+      "UpdateItem",
+      this.sourcesTable,
       {
-        table: this.sourcesTable,
-        key: {
-          PK: tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.format(
-              "NS#{}",
-              sfn.JsonPath.stringAt("$.namespace_id"),
-            ),
+        PK: tasks.DynamoAttributeValue.fromString(
+          sfn.JsonPath.format("NS#{}", sfn.JsonPath.stringAt("$.namespace_id")),
+        ),
+        SK: tasks.DynamoAttributeValue.fromString(
+          sfn.JsonPath.format(
+            "SRC#{}",
+            sfn.JsonPath.stringAt("$.doc_source_id"),
           ),
-          SK: tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.format(
-              "SRC#{}",
-              sfn.JsonPath.stringAt("$.doc_source_id"),
-            ),
-          ),
-        },
+        ),
+      },
+      {
         updateExpression:
           "SET #s = :s, #ft = :ft, #fp = :fp, #fs = :fs, #fe = :fe, #pi = :pi, #pik = :pik, #pit = :pit, #u = :u",
         expressionAttributeNames: {
@@ -2655,7 +2728,6 @@ export class SourcesStack extends SCLStack {
             sfn.JsonPath.stringAt("$$.State.EnteredTime"),
           ),
         },
-        resultPath: sfn.JsonPath.DISCARD,
       },
     );
     savePreprocessingResults.addCatch(docErrorChain, { resultPath: "$.error" });
@@ -2798,26 +2870,20 @@ export class SourcesStack extends SCLStack {
       resultPath: "$.error",
     });
 
-    const docDeleteDdbRecord = new tasks.DynamoDeleteItem(
-      this,
+    const docDeleteDdbRecord = makeDdbWrite(
       "SourcesDocDeleteDdbRecord",
+      "DeleteItem",
+      this.sourcesTable,
       {
-        table: this.sourcesTable,
-        key: {
-          PK: tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.format(
-              "NS#{}",
-              sfn.JsonPath.stringAt("$.namespace_id"),
-            ),
+        PK: tasks.DynamoAttributeValue.fromString(
+          sfn.JsonPath.format("NS#{}", sfn.JsonPath.stringAt("$.namespace_id")),
+        ),
+        SK: tasks.DynamoAttributeValue.fromString(
+          sfn.JsonPath.format(
+            "SRC#{}",
+            sfn.JsonPath.stringAt("$.doc_source_id"),
           ),
-          SK: tasks.DynamoAttributeValue.fromString(
-            sfn.JsonPath.format(
-              "SRC#{}",
-              sfn.JsonPath.stringAt("$.doc_source_id"),
-            ),
-          ),
-        },
-        resultPath: sfn.JsonPath.DISCARD,
+        ),
       },
     );
     docDeleteDdbRecord.addCatch(docDeletionErrorChain, {

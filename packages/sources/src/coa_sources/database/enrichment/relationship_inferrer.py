@@ -125,7 +125,9 @@ def _infer_batch_raw(
     emitter: EnrichmentMetricEmitter,
     *,
     stage: str,
-    max_tokens: int = 8192,
+    # Pass 2 relies on this default (cross-source passes its own). Sized for
+    # reasoning models: on 60 tables Haiku already used 8,164 of the old 8192.
+    max_tokens: int = 32768,
 ) -> object:
     """Invoke Bedrock once and return the parsed result, emitting success metrics.
 

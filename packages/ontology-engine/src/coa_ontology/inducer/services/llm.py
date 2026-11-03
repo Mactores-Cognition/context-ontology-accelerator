@@ -63,7 +63,7 @@ class LLMClient:
             )
         return self._client
 
-    def generate(self, prompt: str, system: str = "", max_tokens: int = 4096) -> str:
+    def generate(self, prompt: str, system: str = "", max_tokens: int = 8192) -> str:
         """Generate text from Bedrock for the given prompt.
 
         Args:

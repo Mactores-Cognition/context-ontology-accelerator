@@ -103,7 +103,7 @@ class TestUnstructuredDispatchForwardsGrounding:
             strategy="unstructured_lexical_graph",
         )
         unstructured_body = _dispatch(body)
-        assert unstructured_body.rerank_max_tokens == 1000
+        assert unstructured_body.rerank_max_tokens == 4096
 
 
 @pytest.mark.unit
@@ -139,7 +139,7 @@ class TestWorkbenchRequestGroundingAliases:
 
     def test_rerank_max_tokens_default(self):
         b = WorkbenchInductionRequest(ontology_uri_prefix="http://x/o#")
-        assert b.rerank_max_tokens == 1000
+        assert b.rerank_max_tokens == 4096
 
     @pytest.mark.parametrize("bad", [0, -1, 8193, 100000])
     def test_rerank_max_tokens_out_of_range_rejected(self, bad):

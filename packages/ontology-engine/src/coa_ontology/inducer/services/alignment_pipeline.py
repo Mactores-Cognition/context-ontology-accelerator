@@ -139,7 +139,7 @@ Superclasses: {", ".join(ctx["superclasses"]) or "none"}
 What is the relationship between concept A and concept B?"""
 
         try:
-            raw = self.llm.generate(prompt, system=CLASSIFY_SYSTEM, max_tokens=100)
+            raw = self.llm.generate(prompt, system=CLASSIFY_SYSTEM, max_tokens=1024)  # reasoning headroom
             line = raw.strip().split("\n")[0]
             parts = line.split("|")
             return AlignmentResult(

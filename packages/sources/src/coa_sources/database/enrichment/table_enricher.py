@@ -452,9 +452,13 @@ def _call_bedrock(
         extra_context=extra_context,
         extra_context_hint=extra_context_hint,
     )
-    max_tokens = 4096
+    # Sized for reasoning models (GPT-5.6 Luna), which spend part of maxTokens on
+    # reasoning before the answer. Pass 1 needs ~110-120 output tokens per column
+    # and a table of up to COLUMN_BATCH_THRESHOLD (80) columns goes in one call
+    # (~9,600 tokens). A ceiling, not a target: only tokens written are billed.
+    max_tokens = 16384
     if extra_context:
-        max_tokens = 16384 if extra_context_hint else 8192
+        max_tokens = 32768
 
     result = client.invoke(SYSTEM_PROMPT, user_prompt, max_tokens=max_tokens)
 

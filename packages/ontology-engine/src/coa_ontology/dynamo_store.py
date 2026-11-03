@@ -387,7 +387,7 @@ def put_job(
             "datasource_ids": request_body.get("datasource_ids", []),
             "datasources": datasource_details,
             "confidence_threshold": str(request_body.get("confidence_threshold", 0.80)),
-            "rerank_max_tokens": str(request_body.get("rerank_max_tokens", 1000)),
+            "rerank_max_tokens": str(request_body.get("rerank_max_tokens", 4096)),
             "scoring_strategy": request_body.get("scoring_strategy", "lexical"),
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),

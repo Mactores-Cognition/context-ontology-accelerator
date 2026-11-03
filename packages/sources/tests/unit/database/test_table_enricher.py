@@ -1288,7 +1288,7 @@ class TestCallBedrockMaxTokens:
     @patch("coa_sources.database.enrichment.table_enricher._write_enriched_assets")
     @patch("coa_sources.database.enrichment.table_enricher.read_assets_for_datasource")
     @patch("coa_sources.database.enrichment.table_enricher.BedrockClient")
-    def test_extra_context_with_hint_uses_16384_tokens(
+    def test_extra_context_with_hint_uses_32768_tokens(
         self, mock_client_cls: MagicMock, mock_read: MagicMock, mock_write: MagicMock
     ) -> None:
         mock_client_cls.return_value.invoke.return_value = _mock_invocation_result()
@@ -1307,7 +1307,7 @@ class TestCallBedrockMaxTokens:
             run("ds-123", "ns-456", "dom-789", "full", emitter=MagicMock())
 
         invoke_call = mock_client_cls.return_value.invoke.call_args_list[0]
-        assert invoke_call[1]["max_tokens"] == 16384
+        assert invoke_call[1]["max_tokens"] == 32768
 
 
 class TestEmptyDescriptionFallback:

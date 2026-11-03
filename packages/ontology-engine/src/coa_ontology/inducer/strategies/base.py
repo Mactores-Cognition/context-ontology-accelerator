@@ -1057,7 +1057,7 @@ class InductionStrategy(ABC):
         config: dict,
         pipeline,
         confidence_threshold: float = 0.80,
-        rerank_max_tokens: int = 1000,
+        rerank_max_tokens: int = 4096,
         embedding_backend: str | None = None,
         scoring_strategy: str = "lexical",
         structural_weight: float = 0.05,

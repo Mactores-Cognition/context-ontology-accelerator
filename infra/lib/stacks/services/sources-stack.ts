@@ -1353,6 +1353,10 @@ export class SourcesStack extends SCLStack {
         // so the shared BedrockClient default (a `us.` profile) always won and
         // enrichment was unreachable from a non-US deploy (#94).
         BEDROCK_CHAT_MODEL_ID: chatModelId,
+        // Bedrock read timeout (s) for Pass 1, Pass 2 and cross-source. The
+        // 32768-token Pass 2 / cross-source budgets plus model reasoning can
+        // run past the 90 s code default (table_enricher.TABLE_TIMEOUT_SEC).
+        ENRICHMENT_TABLE_TIMEOUT_SEC: "300",
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "sources-db-enrichment",
@@ -2268,6 +2272,10 @@ export class SourcesStack extends SCLStack {
         BEDROCK_EMBED_MODEL_ID: embedModelId,
         BEDROCK_EMBED_DIMENSIONS: embedDimensions,
         BEDROCK_CHAT_MODEL_ID: chatModelId,
+        // Output budget for document entity extraction (graph_build
+        // EXTRACTION_MAX_TOKENS, code default 16384). Raised so reasoning
+        // models (GPT-5.6 Luna) have room for reasoning plus the answer.
+        EXTRACTION_MAX_TOKENS: "32768",
         // Content screening: retrieval guardrail for ingestion-time ApplyGuardrail
         // (SDO-188). Empty string disables screening gracefully.
         RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(

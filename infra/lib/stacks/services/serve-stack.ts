@@ -683,6 +683,12 @@ export class ServeStack extends SCLStack {
           // Always emitted so the effective query model is visible in the template.
           BEDROCK_MODEL_ID:
             props.bedrockLlmModelId ?? DEFAULT_BEDROCK_LLM_MODEL_ID,
+          // Output budgets sized for reasoning models (GPT-5.6 Terra), which
+          // spend part of maxTokens on reasoning before the answer. Code
+          // defaults are 4096; NL->SQL is clamped to 512-32768 and Tier 3
+          // answer writing to 4096-64000 in code.
+          SERVE_NL2SQL_MAX_TOKENS: "8192",
+          TIER3_SYNTH_MAX_TOKENS: "16384",
           // Query embedding + graphrag lexical retriever MUST use the same model
           // doc-kg-build ingested with. Config-resolved (#94) so a non-US deploy
           // can set a region-appropriate model; shared ts-shared constant is the

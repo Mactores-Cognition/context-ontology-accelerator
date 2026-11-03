@@ -76,8 +76,9 @@ _LOG_SQL_CHARS = 1500
 _LOG_OBS_CHARS = 400
 _LOG_QUESTION_CHARS = 160
 
-# Token ceiling for the agent's own reasoning turns.
-_AGENT_MAX_TOKENS = 4096
+# Token ceiling for the agent's own reasoning turns. 8192 leaves room for
+# reasoning models (GPT-5.6 Terra), which spend part of maxTokens on reasoning.
+_AGENT_MAX_TOKENS = 8192
 
 _DEFAULT_REGION = "us-east-1"
 

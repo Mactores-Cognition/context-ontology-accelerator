@@ -180,7 +180,9 @@ def infer_constraints_from_ontology(
         component=COMPONENT_ONTOLOGY_SHAPES,
     )
     try:
-        data = bedrock.invoke(_INFER_SYSTEM, prompt, max_tokens=4096)
+        # 8192 leaves room for reasoning models (GPT-5.6 Luna), which spend part
+        # of maxTokens on reasoning before the answer.
+        data = bedrock.invoke(_INFER_SYSTEM, prompt, max_tokens=8192)
         classes = []
         for cls_data in data.result:
             constraints = [

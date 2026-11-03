@@ -164,7 +164,7 @@ class TestSqlAgentHappyPath:
 
         kwargs = strands_fake.last_agent.model.kwargs
         assert kwargs["model_id"] == "model-x" and kwargs["region_name"] == "eu-west-1"
-        assert kwargs["max_tokens"] == 4096
+        assert kwargs["max_tokens"] == 8192
 
     @pytest.mark.asyncio
     async def test_without_override_the_configured_serve_llm_is_used(self, monkeypatch):

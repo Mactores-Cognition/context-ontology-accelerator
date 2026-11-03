@@ -329,7 +329,7 @@ class GroundingService:
             self._bedrock = boto3.client(
                 "bedrock-runtime",
                 region_name=self._llm_region,
-                config=async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
+                config=async_boto_config(read_timeout=300, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
             )
         return self._bedrock
 
@@ -344,7 +344,7 @@ class GroundingService:
         ontology_ids: list[str] | None = None,
         top_k: int = 30,
         exclude_entity_uri: str | None = None,
-        rerank_max_tokens: int = 1000,
+        rerank_max_tokens: int = 4096,
     ) -> GroundingResult:
         """Ground an induced ontology CLASS against loaded ontologies.
 
@@ -390,7 +390,7 @@ class GroundingService:
         ontology_ids: list[str] | None = None,
         top_k: int = 30,
         exclude_entity_uri: str | None = None,
-        rerank_max_tokens: int = 1000,
+        rerank_max_tokens: int = 4096,
         *,
         _rerank_system: str = _RERANK_SYSTEM,
         _subject_kind: str = "table",
@@ -850,7 +850,7 @@ class GroundingService:
         candidates: list[GroundingCandidate],
         rerank_system: str = _RERANK_SYSTEM,
         subject_kind: str = "table",
-        max_tokens: int = 1000,
+        max_tokens: int = 4096,
         candidate_window: int = _RERANK_CANDIDATE_WINDOW,
     ) -> dict:
         """Ask the LLM to pick the best candidate or abstain.

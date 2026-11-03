@@ -223,7 +223,7 @@ class BedrockStepPlanner:
         *,
         guardrail_id: str | None = None,
         guardrail_id_provider: Callable[[], str] | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         max_question_chars: int = _MAX_QUESTION_CHARS,
     ) -> None:
         """Bind the planner LLM client and its guardrail / token / length bounds."""

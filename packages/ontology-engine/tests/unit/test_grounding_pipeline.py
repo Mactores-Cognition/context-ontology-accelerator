@@ -519,10 +519,10 @@ class TestEnhancedRerank:
         _, kwargs = svc._bedrock.converse.call_args
         assert kwargs["inferenceConfig"]["maxTokens"] == 1500
 
-    def test_rerank_max_tokens_defaults_to_1000(self):
-        # Omitting the knob uses the 1000 default (above the broken 200, below
-        # the 4096 general default), so a reasoning model's thinking doesn't
-        # truncate the JSON answer on the happy path.
+    def test_rerank_max_tokens_defaults_to_4096(self):
+        # Omitting the knob uses the 4096 default (raised from 1000 for
+        # reasoning models such as GPT-5.6 Luna), so the model's reasoning
+        # doesn't truncate the JSON answer on the happy path.
         hits = [
             {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
         ]
@@ -540,7 +540,7 @@ class TestEnhancedRerank:
             ontology_ids=["fibo"],
         )
         _, kwargs = svc._bedrock.converse.call_args
-        assert kwargs["inferenceConfig"]["maxTokens"] == 1000
+        assert kwargs["inferenceConfig"]["maxTokens"] == 4096
 
     def test_to_concept_match_after_real_pipeline(self):
         hits = [

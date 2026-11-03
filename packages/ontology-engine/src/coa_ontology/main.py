@@ -306,7 +306,7 @@ def readiness():
         # critical path the unstructured induction worker uses, so an error
         # here surfaces the misconfiguration before any job is started.
         llm_client = _make_description_llm_client(app.state.config)
-        out = llm_client.generate(prompt="ping", max_tokens=4)
+        out = llm_client.generate(prompt="ping", max_tokens=256)  # reasoning models return nothing at 4
         if not out:
             description_llm_status = "unexpected_response"
     except Exception:

@@ -272,7 +272,7 @@ class LLMClient(Protocol):
         *,
         system: str | None = None,
         guardrail_id: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         temperature: float | None = None,
         top_p: float | None = None,
         guard_content: str | None = None,
@@ -299,7 +299,7 @@ class LLMClient(Protocol):
         *,
         system: str | None = None,
         guardrail_id: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         guard_content: str | None = None,
         model_id: str | None = None,
     ) -> AsyncIterator[str]:

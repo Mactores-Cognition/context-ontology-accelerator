@@ -201,13 +201,13 @@ class WorkbenchInductionRequest(BaseModel):
     label: str | None = None
     embedding_backend: str | None = None
     confidence_threshold: float = 0.80
-    # Output-token cap for the ENHANCED-mode LLM grounding rerank. Default 1000
-    # (well above the short JSON answer, giving reasoning models headroom so
-    # their thinking doesn't truncate the JSON → fail-loud). Per-request so it's
-    # adjustable without a redeploy. Bounds mirror the Smithy RerankMaxTokens
-    # type (@range min 1, max 8192).
+    # Output-token cap for the ENHANCED-mode LLM grounding rerank. Default 4096
+    # (well above the short JSON answer, giving reasoning models such as
+    # GPT-5.6 Luna headroom so their reasoning doesn't truncate the JSON →
+    # fail-loud). Per-request so it's adjustable without a redeploy. Bounds
+    # mirror the Smithy RerankMaxTokens type (@range min 1, max 8192).
     rerank_max_tokens: int = Field(
-        default=1000, ge=1, le=8192, validation_alias=AliasChoices("rerank_max_tokens", "rerankMaxTokens")
+        default=4096, ge=1, le=8192, validation_alias=AliasChoices("rerank_max_tokens", "rerankMaxTokens")
     )
     grounding_ontology_ids: list[str] | None = Field(
         default=None, validation_alias=AliasChoices("grounding_ontology_ids", "groundingOntologyIds")
@@ -1179,7 +1179,7 @@ def start_induction(body: WorkbenchInductionRequest, request: Request, namespace
             # foundational_grounded stays 0).
             grounding_ontology_ids=getattr(body, "grounding_ontology_ids", None),
             grounding_mode=getattr(body, "grounding_mode", "ENHANCED"),
-            rerank_max_tokens=getattr(body, "rerank_max_tokens", 1000),
+            rerank_max_tokens=getattr(body, "rerank_max_tokens", 4096),
         )
         return start_unstructured(body=unstructured_body, request=request, namespace=namespace)
 

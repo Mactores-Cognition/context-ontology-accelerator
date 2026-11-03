@@ -62,8 +62,9 @@ _TABLE_PROMPT_FALLBACK_TEMPLATE = _load_prompt("rigor_generate_delta_fallback.pr
 _JUDGE_PROMPT_TEMPLATE = _load_prompt("rigor_judge.prompt")
 
 # Opus 4.7 supports large output; raise from the paper's 2k so rich
-# ontology fragments for wide tables are not truncated.
-_MAX_OUTPUT_TOKENS = 8192
+# ontology fragments for wide tables are not truncated. 16384 leaves room for
+# reasoning models (GPT-5.6 Terra), which spend part of maxTokens on reasoning.
+_MAX_OUTPUT_TOKENS = 16384
 _MAX_CORE_FRAGMENTS_IN_CONTEXT = 5
 _RAG_TOP_K_CLASSES = 5
 _RAG_TOP_K_PROPERTIES = 5
@@ -147,7 +148,7 @@ class RigorOntologyStrategy(InductionStrategy):
         config: dict,
         pipeline,
         confidence_threshold: float = 0.80,
-        rerank_max_tokens: int = 1000,
+        rerank_max_tokens: int = 4096,
         embedding_backend: str | None = None,
         scoring_strategy: str = "lexical",
         structural_weight: float = 0.05,
@@ -531,7 +532,7 @@ class RigorOntologyStrategy(InductionStrategy):
         return boto3.client(
             "bedrock-runtime",
             region_name=config.get("llm_region", "us-east-1"),
-            config=async_boto_config(read_timeout=120),
+            config=async_boto_config(read_timeout=300),  # 16384-token answers plus reasoning
         )
 
     def _call_llm(

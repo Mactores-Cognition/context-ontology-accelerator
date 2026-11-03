@@ -211,7 +211,7 @@ float ConfidenceThreshold
 /// Output-token cap for the ENHANCED-mode LLM grounding rerank.
 /// The upper bound mirrors the induction pipeline's top-end output-token
 /// budget; it is a schema guardrail against typos/absurd values, not an
-/// Amazon Bedrock API limit. Omitted → the server default (1000) is used.
+/// Amazon Bedrock API limit. Omitted → the server default (4096) is used.
 @range(min: 1, max: 8192)
 integer RerankMaxTokens
 
@@ -241,7 +241,7 @@ operation StartInduction {
 
         /// Output-token cap for the ENHANCED-mode LLM grounding rerank.
         /// Raise it when a reasoning model truncates its JSON answer (the
-        /// rerank fails loud naming this knob). Omitted → server default (1000).
+        /// rerank fails loud naming this knob). Omitted → server default (4096).
         rerankMaxTokens: RerankMaxTokens
 
         /// Induction strategy to use.

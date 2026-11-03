@@ -207,10 +207,11 @@ def infer_cross_source_relationships(
     return candidates
 
 
-# Output budget for one pair prompt. Larger than Pass 2's default 8192 because a
-# pair of description-rich sources can legitimately yield many candidates; a
-# truncated response is caught and reported rather than returned partially.
-_PAIR_MAX_TOKENS = 16384
+# Output budget for one pair prompt. A pair of description-rich sources can
+# legitimately yield many candidates, and reasoning models (GPT-5.6 Luna) spend
+# part of the budget on reasoning; a truncated response is caught and reported
+# rather than returned partially.
+_PAIR_MAX_TOKENS = 32768
 
 
 def _infer_pair(

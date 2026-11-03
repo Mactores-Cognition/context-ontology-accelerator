@@ -19,7 +19,7 @@ import defusedxml
 from coa_common import DEFAULT_EMBED_MODEL_ID
 
 # ── Workbench-specific ──────────────────────────────────────────────────
-from coa_common.constants import DEFAULT_LLM_MODEL_ID
+from coa_common.constants import DEFAULT_CHAT_MODEL_ID, DEFAULT_LLM_MODEL_ID
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -156,7 +156,7 @@ app.state.config = {
     # which left rerank on a hard-coded Claude Haiku; now the chat model unless overridden.
     "grounding_llm_model_id": os.getenv("GROUNDING_LLM_MODEL_ID")
     or os.getenv("BEDROCK_CHAT_MODEL_ID")
-    or DEFAULT_LLM_MODEL_ID,
+    or DEFAULT_CHAT_MODEL_ID,
     "description_mode": os.getenv("DESCRIPTION_MODE", "schema"),
     "neptune_analytics_url": os.getenv("NEPTUNE_ANALYTICS_URL", "http://localhost:9200"),
     "neptune_endpoint": os.getenv("NEPTUNE_ENDPOINT", os.getenv("NDB_ENDPOINT", "")),

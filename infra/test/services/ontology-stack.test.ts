@@ -103,7 +103,7 @@ describe("OntologyStack model IDs from deploy config (#94)", () => {
     );
     expect(envValue(t, "BEDROCK_EMBED_DIMENSIONS")).toBe("1024");
     expect(envValue(t, "OSS_DIMENSIONS")).toBe("1024");
-    expect(envValue(t, "LLM_MODEL_ID")).toBe("us.amazon.nova-pro-v1:0");
+    expect(envValue(t, "LLM_MODEL_ID")).toBe("us.openai.gpt-5.6-terra");
   });
 
   test("dashboard ModelId dimensions follow the configured models", () => {
@@ -127,10 +127,24 @@ describe("OntologyStack model IDs from deploy config (#94)", () => {
     expect(body).not.toContain("us.cohere.embed-v4:0");
   });
 
+  test("default induction and chat models are each priced at their own rate", () => {
+    const t = renderOntology({}, "DefaultModelDash");
+    const body = JSON.stringify(
+      Object.values(t.findResources("AWS::CloudWatch::Dashboard")),
+    );
+    expect(body).toContain("i0*0.0022/1000 + o0*0.0132/1000");
+    expect(body).toContain("i1*0.00022/1000 + o1*0.00132/1000");
+  });
+
   test("a model shared by induction and chat is priced once, at its own rate", () => {
-    // Both roles default to Nova Pro; summing a term per role would count
-    // the same AWS/Bedrock tokens twice.
-    const t = renderOntology({}, "SharedModelDash");
+    // Summing a term per role would count the same AWS/Bedrock tokens twice.
+    const t = renderOntology(
+      {
+        bedrockInductionLlmModelId: "us.amazon.nova-pro-v1:0",
+        bedrockChatModelId: "us.amazon.nova-pro-v1:0",
+      },
+      "SharedModelDash",
+    );
     const body = JSON.stringify(
       Object.values(t.findResources("AWS::CloudWatch::Dashboard")),
     );

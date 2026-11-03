@@ -27,6 +27,7 @@ from coa_common.bedrock import (
 from coa_common.config import SCLConfig, resolve_region
 from coa_common.constants import (
     ACTIVE_INGESTION_STATUSES,
+    DEFAULT_CHAT_MODEL_ID,
     DEFAULT_DELETE_PREV_VERSIONS,
     DEFAULT_EMBED_DIMENSIONS,
     DEFAULT_EMBED_MODEL_ID,
@@ -137,6 +138,7 @@ __all__ = [
     "BusinessMetadata",
     "CORS_HEADERS",
     "Column",
+    "DEFAULT_CHAT_MODEL_ID",
     "DEFAULT_DELETE_PREV_VERSIONS",
     "DEFAULT_EMBED_DIMENSIONS",
     "DEFAULT_EMBED_MODEL_ID",

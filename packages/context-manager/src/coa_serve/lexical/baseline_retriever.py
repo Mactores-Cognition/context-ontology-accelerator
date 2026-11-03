@@ -24,6 +24,7 @@ import graphrag_toolkit.lexical_graph.config as _graphrag_cfg
 import structlog
 from coa_common import make_llama_index_embedding, resolve_region
 from coa_common.constants import DEFAULT_EMBED_DIMENSIONS, DEFAULT_EMBED_MODEL_ID, DEFAULT_LLM_MODEL_ID
+from coa_common.llamaindex_compat import register_bedrock_converse_model
 
 from ..step_ids import StepId
 from ..tier3.graph_traverser import GraphEntity
@@ -45,6 +46,9 @@ from .strategies import DEFAULT_SPEC, StrategySpec
 _ACTIVE_MODEL = os.environ.get("GRAPHRAG_LLM_MODEL") or os.environ.get("BEDROCK_MODEL_ID") or DEFAULT_LLM_MODEL_ID
 _graphrag_cfg.DEFAULT_RESPONSE_MODEL = _ACTIVE_MODEL
 _graphrag_cfg.DEFAULT_EXTRACTION_MODEL = _ACTIVE_MODEL
+# The toolkit builds this model as a LlamaIndex BedrockConverse, which rejects ids
+# newer than its tables (e.g. GPT-5.6 Terra) and always sends temperature.
+register_bedrock_converse_model(_ACTIVE_MODEL)
 
 logger = structlog.get_logger(__name__)
 

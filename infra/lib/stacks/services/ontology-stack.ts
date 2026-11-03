@@ -843,20 +843,28 @@ export class OntologyStack extends SCLStack {
     // container environment above (#94) — they used to be duplicate literals, so
     // a model change for a non-US deploy left these widgets querying a
     // dimension with no data.
-    // Induction (LLM_MODEL_ID) and chat (grounding rerank, enrichment) default to
-    // the same model; dedupe so a shared model is graphed and priced once.
+    // Induction (LLM_MODEL_ID) and chat (grounding rerank, enrichment) can be
+    // configured to the same model; dedupe so a shared model is graphed and priced
+    // once.
     const llmModelIds = [...new Set([inductionModelId, chatModelId])];
 
     // ponytail: Hardcoded on-demand list prices (USD per 1K tokens) — CloudWatch
     // math cannot look prices up, so these MUST be updated by hand if AWS Bedrock
-    // pricing changes. Nova Pro ($0.80/$3.20 per 1M, as in
-    // coa_common.bedrock_metrics) is the default; the Claude rows (Sonnet base tier,
-    // Haiku 4.5) price commercial deployments that override the model. Unlisted
-    // models are priced at the Nova Pro rate.
+    // pricing changes. The defaults are GPT-5.6 Terra (induction) and Luna (chat),
+    // at the Bedrock model-card US geo-profile rates for prompts up to 272K tokens,
+    // as in coa_common.bedrock_metrics; the Claude rows (Sonnet base tier, Haiku 4.5)
+    // price deployments that override the model. Unlisted models are priced at the
+    // Nova Pro rate ($0.80/$3.20 per 1M).
     const llmPricePer1K = (
       modelId: string,
     ): { input: number; output: number } => {
       const id = modelId.toLowerCase();
+      if (id.includes("gpt-5.6-terra")) {
+        return { input: 0.0022, output: 0.0132 };
+      }
+      if (id.includes("gpt-5.6-luna")) {
+        return { input: 0.00022, output: 0.00132 };
+      }
       if (id.includes("claude") && id.includes("sonnet")) {
         return { input: 0.003, output: 0.015 };
       }

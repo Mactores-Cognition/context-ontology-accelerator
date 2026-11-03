@@ -51,7 +51,7 @@ class TestDefaultModelIdResolution:
     def test_falls_back_to_the_shared_default(self, monkeypatch):
         monkeypatch.delenv("BEDROCK_CHAT_MODEL_ID", raising=False)
         assert resolve_chat_model_id() == FALLBACK_CHAT_MODEL_ID
-        assert FALLBACK_CHAT_MODEL_ID == "us.amazon.nova-pro-v1:0"
+        assert FALLBACK_CHAT_MODEL_ID == "us.openai.gpt-5.6-luna"
 
     def test_empty_env_var_falls_back(self, monkeypatch):
         # An empty value is a misconfiguration, not a request for an empty model
@@ -113,7 +113,7 @@ class TestBedrockClient:
         assert result.output_tokens == 5
         assert result.latency_ms > 0
         mock_client.converse.assert_called_once_with(
-            modelId="us.amazon.nova-pro-v1:0",
+            modelId="us.openai.gpt-5.6-luna",
             messages=[{"role": "user", "content": [{"text": "user"}]}],
             system=[{"text": "system"}],
             inferenceConfig={"maxTokens": 4096},

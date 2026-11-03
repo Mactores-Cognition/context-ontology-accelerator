@@ -169,15 +169,19 @@ export const DEFAULT_EVENT_BUS_NAME = "default";
 export const DEFAULT_BEDROCK_MODEL_ID = "amazon.nova-2-multimodal-embeddings-v1:0";
 
 /**
- * Default Bedrock text model for every LLM role. Amazon Nova Pro, because
- * Anthropic models are not approved for the target GovCloud deployment.
- * MUST match the Python single source of truth
- * (coa_common.constants.DEFAULT_LLM_MODEL_ID); `infra/test/model-id-defaults.test.ts`
- * pins them together. The `us.` profile is US-commercial only: a us-gov-west-1
- * deployment sets the bare in-region id `amazon.nova-pro-v1:0` for every LLM
- * key in its SSM config (synth-time region validation fails otherwise).
+ * Default Bedrock text models, in two tiers mirroring the original Haiku/Sonnet
+ * split. OpenAI GPT-5.6 Terra for the reasoning-heavy roles (ontology
+ * induction, description generation, the serve query LLM); GPT-5.6 Luna for the
+ * high-volume chat role (enrichment, constraint inference, grounding rerank,
+ * document KG extraction). MUST match the Python single source of truth
+ * (coa_common.constants.DEFAULT_LLM_MODEL_ID / DEFAULT_CHAT_MODEL_ID);
+ * `infra/test/model-id-defaults.test.ts` pins them together. Both are invoked
+ * only through the `us.` geo profile (US commercial regions); a deployment
+ * elsewhere sets every LLM key in its SSM config (synth-time region validation
+ * fails otherwise).
  */
-const DEFAULT_BEDROCK_TEXT_MODEL_ID = "us.amazon.nova-pro-v1:0";
+const DEFAULT_BEDROCK_REASONING_MODEL_ID = "us.openai.gpt-5.6-terra";
+const DEFAULT_BEDROCK_HIGH_VOLUME_MODEL_ID = "us.openai.gpt-5.6-luna";
 
 /**
  * Default Bedrock chat/completion model ID (`bedrockChatModelId`). Distinct
@@ -187,14 +191,14 @@ const DEFAULT_BEDROCK_TEXT_MODEL_ID = "us.amazon.nova-pro-v1:0";
  * the model (e.g. AWS/Bedrock ModelId dashboard dimensions) go dark if this
  * drifts from the Python default, so the two must move together.
  */
-export const DEFAULT_BEDROCK_CHAT_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;
+export const DEFAULT_BEDROCK_CHAT_MODEL_ID = DEFAULT_BEDROCK_HIGH_VOLUME_MODEL_ID;
 
 /**
  * Default Bedrock model ID for ontology induction and description generation
  * (ontology-engine LLM_MODEL_ID / DESCRIPTION_LLM_MODEL_ID). Overridable per
  * deployment via the `bedrockInductionLlmModelId` SSM config key (#94).
  */
-export const DEFAULT_BEDROCK_INDUCTION_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;
+export const DEFAULT_BEDROCK_INDUCTION_MODEL_ID = DEFAULT_BEDROCK_REASONING_MODEL_ID;
 
 /**
  * Default Bedrock model ID for the serve query LLM (Tier-2/Tier-3 reasoning,
@@ -204,4 +208,4 @@ export const DEFAULT_BEDROCK_INDUCTION_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;
  * can reason about the *effective* model id for a deployment that has no
  * config at all (#1020).
  */
-export const DEFAULT_BEDROCK_LLM_MODEL_ID = DEFAULT_BEDROCK_TEXT_MODEL_ID;
+export const DEFAULT_BEDROCK_LLM_MODEL_ID = DEFAULT_BEDROCK_REASONING_MODEL_ID;

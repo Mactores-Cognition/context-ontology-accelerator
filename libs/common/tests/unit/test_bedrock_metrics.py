@@ -120,6 +120,22 @@ class TestCostFor:
     def test_nova_inference_profile_ids_price_per_variant(self, model_id: str, expected: float) -> None:
         assert cost_for(model_id, 1_000_000, 1_000_000) == pytest.approx(expected)
 
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            # 1M in + 1M out at the Bedrock model-card Geo CRIS rates (2026-11-03).
+            ("openai.gpt-5.6-luna", 0.22 + 1.32),
+            ("us.openai.gpt-5.6-luna", 0.22 + 1.32),
+            ("openai.gpt-5.6-terra", 2.20 + 13.20),
+            ("us.openai.gpt-5.6-terra", 2.20 + 13.20),
+        ],
+    )
+    def test_gpt_5_6_models_price_in_every_id_form(self, model_id: str, expected: float) -> None:
+        assert cost_for(model_id, 1_000_000, 1_000_000) == pytest.approx(expected)
+
+    def test_other_gpt_generation_is_not_priced_as_5_6(self) -> None:
+        assert cost_for("us.openai.gpt-6-luna", 1_000_000, 1_000_000) == 0.0
+
     def test_unlisted_nova_variant_is_not_silently_priced_as_another(self) -> None:
         # No bare "nova" family key: nova-micro must warn + return 0.0 rather than
         # borrowing Pro's rate (a 13x error).

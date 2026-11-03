@@ -144,14 +144,14 @@ export interface SsmConfig {
 
   /** Bedrock LLM model ID for ontology induction and description
    *  generation (ontology-engine LLM_MODEL_ID /
-   *  DESCRIPTION_LLM_MODEL_ID). Defaults to us.amazon.nova-pro-v1:0
+   *  DESCRIPTION_LLM_MODEL_ID). Defaults to us.openai.gpt-5.6-terra
    *  (DEFAULT_BEDROCK_INDUCTION_MODEL_ID). */
   readonly bedrockInductionLlmModelId?: string;
 
   /** Bedrock chat/completion model ID for source enrichment, constraint
    *  inference, grounding rerank, and document KG extraction (the shared
    *  BedrockClient default and the doc-ingestion inference-profile ARN).
-   *  Defaults to us.amazon.nova-pro-v1:0 (DEFAULT_BEDROCK_CHAT_MODEL_ID). */
+   *  Defaults to us.openai.gpt-5.6-luna (DEFAULT_BEDROCK_CHAT_MODEL_ID). */
   readonly bedrockChatModelId?: string;
 
   /** Model IDs allowed for per-request override via options.modelId.

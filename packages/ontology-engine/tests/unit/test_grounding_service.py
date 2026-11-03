@@ -465,10 +465,10 @@ class TestModelResolution:
         return monkeypatch
 
     def test_defaults_to_shared_constant(self, env, mock_catalog, mock_eg):
-        from coa_common.constants import DEFAULT_LLM_MODEL_ID
+        from coa_common.constants import DEFAULT_CHAT_MODEL_ID
 
         svc = GroundingService(ontology_catalog=mock_catalog, embedding_generator=mock_eg)
-        assert svc._llm_model_id == DEFAULT_LLM_MODEL_ID
+        assert svc._llm_model_id == DEFAULT_CHAT_MODEL_ID
 
     def test_env_resolution_order(self, env, mock_catalog, mock_eg):
         env.setenv("BEDROCK_CHAT_MODEL_ID", "amazon.nova-pro-v1:0")

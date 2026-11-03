@@ -256,10 +256,10 @@ fi
 # The defaults MUST match libs/ts-shared/src/constants.ts — pinned by
 # infra/test/model-id-defaults.test.ts. Node is already a required deploy
 # prerequisite, so use it here instead of making model validation depend on jq.
-_DEFAULT_LLM_MODEL_ID="us.amazon.nova-pro-v1:0"
+_DEFAULT_LLM_MODEL_ID="us.openai.gpt-5.6-terra"
 _DEFAULT_EMBED_MODEL_ID="amazon.nova-2-multimodal-embeddings-v1:0"
-_DEFAULT_INDUCTION_MODEL_ID="us.amazon.nova-pro-v1:0"
-_DEFAULT_CHAT_MODEL_ID="us.amazon.nova-pro-v1:0"
+_DEFAULT_INDUCTION_MODEL_ID="us.openai.gpt-5.6-terra"
+_DEFAULT_CHAT_MODEL_ID="us.openai.gpt-5.6-luna"
 _CONFIG_PARAM="/${SCL_PREFIX:-coa}/config"
 
 # Geographies (as inference-profile prefixes) whose profiles are published in

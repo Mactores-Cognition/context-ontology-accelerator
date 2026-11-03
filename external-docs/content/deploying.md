@@ -150,8 +150,8 @@ by the deploy, see [Appendix A: AWS Service Inventory](#appendix-a-aws-service-i
 #### Bedrock model availability
 
 Availability of the *service* is not enough — the specific **foundation models must also be
-enabled in your region**. The default text model is a **US cross-region inference profile**
-(`us.amazon.nova-pro-v1:0`) that cannot be invoked from a non-US source region, and the default
+enabled in your region**. The default text models are **US cross-region inference profiles**
+(`us.openai.gpt-5.6-terra`, `us.openai.gpt-5.6-luna`) that cannot be invoked from a non-US source region, and the default
 embedding model (`amazon.nova-2-multimodal-embeddings-v1:0`) is **in-region only** and published in
 `us-east-1` and `us-gov-west-1` only.
 
@@ -163,11 +163,13 @@ or the bare in-region model ID. The models to check:
 
 | Model | Used for |
 |-------|----------|
-| Amazon Nova Pro | Every text-LLM role: induction, grounding rerank, enrichment, document ingestion, serve query resolution (NL-to-SPARQL, synthesis) |
+| OpenAI GPT-5.6 Terra | Ontology induction, description generation, serve query resolution (NL-to-SPARQL, synthesis) |
+| OpenAI GPT-5.6 Luna | Grounding rerank, enrichment, constraint inference, document ingestion |
 | Amazon Nova Multimodal Embeddings | All embeddings (text only; 1024 dimensions by default) |
 
-Nova Pro returns at most 10K output tokens per call; the solution lowers any larger per-call budget
-to that ceiling automatically. Set the `BEDROCK_MAX_OUTPUT_TOKENS` environment variable on a service
+GPT-5.6 Luna and Terra reject the `temperature` and `topP` sampling parameters; the solution does not
+send them to these models. If you switch to Nova Pro, note that it returns at most 10K output tokens per
+call; the solution lowers any larger per-call budget to that ceiling automatically. Set the `BEDROCK_MAX_OUTPUT_TOKENS` environment variable on a service
 to apply a ceiling for a model the solution does not know.
 
 Not every model offers every profile type in every region — Nova Multimodal Embeddings, for example,
@@ -188,11 +190,11 @@ exactly as it does today; outside the US the defaults are unusable (see the warn
 
 | Config key | Sets the model for | Default |
 |------------|--------------------|---------|
-| `bedrockLlmModelId` | Serve query LLM (NL-to-SPARQL, synthesis) | `us.amazon.nova-pro-v1:0` |
+| `bedrockLlmModelId` | Serve query LLM (NL-to-SPARQL, synthesis) | `us.openai.gpt-5.6-terra` |
 | `bedrockEmbedModelId` | **All** embeddings — induction, doc-KG-build, metric matching, serve retrieval | `amazon.nova-2-multimodal-embeddings-v1:0` |
 | `bedrockEmbedDimensions` | Vector dimension for the embedding model above (Nova: 256, 384, 1024 or 3072). Keep `1024` — serve and metric-service always use 1024 | `1024` |
-| `bedrockInductionLlmModelId` | Ontology induction, description generation | `us.amazon.nova-pro-v1:0` |
-| `bedrockChatModelId` | Source enrichment, constraint inference, grounding rerank, document-ingestion extraction | `us.amazon.nova-pro-v1:0` |
+| `bedrockInductionLlmModelId` | Ontology induction, description generation | `us.openai.gpt-5.6-terra` |
+| `bedrockChatModelId` | Source enrichment, constraint inference, grounding rerank, document-ingestion extraction | `us.openai.gpt-5.6-luna` |
 
 Both **geographic inference profiles** (`us.`, `eu.`, `apac.`, `jp.`, `global.`) and **bare in-region model
 IDs** (e.g. `cohere.embed-v4:0`) are accepted — bare IDs matter because some models publish geo

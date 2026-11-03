@@ -2670,7 +2670,7 @@ describe("SourcesStack", () => {
         /sources-doc-trigger|documents-trigger|doc.*trigger/i,
       );
       expect(JSON.stringify(env.BEDROCK_MODEL_ARN)).toContain(
-        "inference-profile/us.amazon.nova-pro-v1:0",
+        "inference-profile/us.openai.gpt-5.6-luna",
       );
     });
   });

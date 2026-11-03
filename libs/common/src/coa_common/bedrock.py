@@ -15,7 +15,7 @@ import boto3
 from botocore.config import Config
 
 from coa_common.config import resolve_region
-from coa_common.constants import DEFAULT_LLM_MODEL_ID
+from coa_common.constants import DEFAULT_CHAT_MODEL_ID
 from coa_common.guardrail_metrics import (
     COMPONENT_ENRICHMENT,
     assessments_from_trace,
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # metric-service embed fallback chain, and reusing it here would cross-wire
 # those models into this client. Must stay in step with the TypeScript
 # DEFAULT_BEDROCK_CHAT_MODEL_ID (libs/ts-shared/src/constants.ts).
-FALLBACK_CHAT_MODEL_ID = DEFAULT_LLM_MODEL_ID
+FALLBACK_CHAT_MODEL_ID = DEFAULT_CHAT_MODEL_ID
 
 
 def resolve_chat_model_id(default: str = FALLBACK_CHAT_MODEL_ID) -> str:

@@ -30,7 +30,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from coa_common import async_boto_config, resolve_region
 from coa_common.bedrock import extract_text_blocks, parse_json_payload
 from coa_common.bedrock_metrics import CostTracker
-from coa_common.constants import DEFAULT_LLM_MODEL_ID
+from coa_common.constants import DEFAULT_CHAT_MODEL_ID
 
 from coa_ontology.inducer.schemas import ConceptMatch, MatchCandidate
 
@@ -295,7 +295,7 @@ class GroundingService:
                 ``LLM_REGION``, then the resolved deployment region.
             llm_model_id: Bedrock model id used to rerank candidates. Defaults to
                 ``GROUNDING_LLM_MODEL_ID``, then the chat model
-                ``BEDROCK_CHAT_MODEL_ID``, then ``DEFAULT_LLM_MODEL_ID``. Callers
+                ``BEDROCK_CHAT_MODEL_ID``, then ``DEFAULT_CHAT_MODEL_ID``. Callers
                 used to omit it, which pinned rerank to a hard-coded Claude Haiku
                 in us-east-1 whatever the deployment configured.
             namespace: Namespace whose per-namespace recall index to query; None uses
@@ -309,7 +309,7 @@ class GroundingService:
             llm_model_id
             or os.environ.get("GROUNDING_LLM_MODEL_ID")
             or os.environ.get("BEDROCK_CHAT_MODEL_ID")
-            or DEFAULT_LLM_MODEL_ID
+            or DEFAULT_CHAT_MODEL_ID
         )
         self._bedrock = None
         # Optional per-job Bedrock usage tracker. When present, every rerank

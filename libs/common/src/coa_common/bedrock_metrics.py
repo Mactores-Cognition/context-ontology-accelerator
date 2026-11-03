@@ -86,6 +86,18 @@ _PRICING: dict[str, dict[str, float]] = {
         "input": 2.50 / 1_000_000,
         "output": 12.50 / 1_000_000,
     },
+    # OpenAI GPT-5.6 text models. Standard-tier Geo CRIS (``us.``) rates for prompts of
+    # 272K input tokens or fewer, from the Bedrock model cards (model-card-openai-gpt-56-
+    # luna / -terra) read 2026-11-03; longer prompts bill higher. Keyed by the BARE model
+    # id; the ``us.openai.*`` profile form resolves through the family entries below.
+    "openai.gpt-5.6-luna": {
+        "input": 0.22 / 1_000_000,
+        "output": 1.32 / 1_000_000,
+    },
+    "openai.gpt-5.6-terra": {
+        "input": 2.20 / 1_000_000,
+        "output": 13.20 / 1_000_000,
+    },
 }
 
 # ponytail: family-prefix fallback so a model-version bump doesn't silently zero out cost.
@@ -106,6 +118,9 @@ _PRICING_FAMILY: dict[str, dict[str, float]] = {
     "nova-lite": _PRICING["amazon.nova-lite-v1:0"],
     "nova-premier": _PRICING["amazon.nova-premier-v1:0"],
     "nova-pro": _PRICING["amazon.nova-pro-v1:0"],
+    # Version-qualified on purpose: other GPT generations are priced differently.
+    "gpt-5.6-luna": _PRICING["openai.gpt-5.6-luna"],
+    "gpt-5.6-terra": _PRICING["openai.gpt-5.6-terra"],
 }
 
 

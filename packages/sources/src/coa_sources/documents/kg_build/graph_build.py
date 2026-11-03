@@ -70,6 +70,7 @@ import traceback
 import structlog
 from coa_common.config import resolve_region
 from coa_common.constants import (
+    DEFAULT_CHAT_MODEL_ID,
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_DELETE_PREV_VERSIONS,
@@ -79,7 +80,6 @@ from coa_common.constants import (
     DEFAULT_ENABLE_VERSIONING,
     DEFAULT_EXTRACTION_MODE,
     DEFAULT_INFER_ENTITY_CLASSIFICATIONS,
-    DEFAULT_LLM_MODEL_ID,
     DEFAULT_PREFERRED_ENTITY_CLASSIFICATIONS_JSON,
     DEFAULT_PREFERRED_TOPICS_JSON,
     DEFAULT_USE_BATCH_INFERENCE,
@@ -91,6 +91,7 @@ from coa_common.constants import (
 )
 from coa_common.dao import DynamoDBDAO
 from coa_common.embeddings import make_llama_index_embedding
+from coa_common.llamaindex_compat import register_bedrock_converse_model
 from coa_common.logging import setup_logging
 from coa_common.model_limits import clamp_max_tokens
 from coa_common.s3 import get_s3_client, list_objects, read_file_bytes
@@ -237,7 +238,7 @@ def _extraction_model() -> str:
 
     Never left unset: graphrag-toolkit's own fallback is a retired Claude model.
     """
-    return BEDROCK_MODEL_ARN or os.environ.get("BEDROCK_CHAT_MODEL_ID") or DEFAULT_LLM_MODEL_ID
+    return BEDROCK_MODEL_ARN or os.environ.get("BEDROCK_CHAT_MODEL_ID") or DEFAULT_CHAT_MODEL_ID
 
 
 # Vector indexes to build: ``chunk`` + ``topic``, matching the graphrag-toolkit
@@ -750,6 +751,9 @@ def _setup_graphrag(tenant_id: str):
     # max_tokens is capped at the model's output ceiling (Nova Pro: 10K), else
     # every extraction request is a ValidationException on such models.
     extraction_model = _extraction_model()
+    # A model newer than the installed LlamaIndex (e.g. GPT-5.6 Luna) is otherwise
+    # rejected before any request, and would be sent the toolkit's temperature=0.0.
+    register_bedrock_converse_model(extraction_model)
     GraphRAGConfig.extraction_llm = json.dumps(
         {"model": extraction_model, "max_tokens": clamp_max_tokens(extraction_model, EXTRACTION_MAX_TOKENS)}
     )

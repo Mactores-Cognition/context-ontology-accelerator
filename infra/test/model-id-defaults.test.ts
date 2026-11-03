@@ -47,6 +47,13 @@ describe("model-id defaults agree across TypeScript, Python and preflight", () =
     /^DEFAULT_LLM_MODEL_ID:\s*str\s*=\s*"([^"]+)"/m,
     "DEFAULT_LLM_MODEL_ID in coa_common/constants.py",
   );
+  // The chat role (enrichment, constraint inference, grounding rerank, document
+  // extraction) has its own constant: a lighter model than the one above.
+  const pythonChatDefault = match(
+    constantsPy,
+    /^DEFAULT_CHAT_MODEL_ID:\s*str\s*=\s*"([^"]+)"/m,
+    "DEFAULT_CHAT_MODEL_ID in coa_common/constants.py",
+  );
   const fallsBackToConstant = (source: string, envVar: string) =>
     new RegExp(
       `os\\.(?:environ\\.get|getenv)\\("${envVar}",\\s*DEFAULT_LLM_MODEL_ID\\)`,
@@ -87,8 +94,8 @@ describe("model-id defaults agree across TypeScript, Python and preflight", () =
 
   it("chat model: ts-shared = coa_common.bedrock.FALLBACK_CHAT_MODEL_ID = preflight", () => {
     const bedrockPy = read("libs", "common", "src", "coa_common", "bedrock.py");
-    expect(bedrockPy).toMatch(/^FALLBACK_CHAT_MODEL_ID\s*=\s*DEFAULT_LLM_MODEL_ID$/m);
-    expect(pythonLlmDefault).toBe(DEFAULT_BEDROCK_CHAT_MODEL_ID);
+    expect(bedrockPy).toMatch(/^FALLBACK_CHAT_MODEL_ID\s*=\s*DEFAULT_CHAT_MODEL_ID$/m);
+    expect(pythonChatDefault).toBe(DEFAULT_BEDROCK_CHAT_MODEL_ID);
     expect(preflightDefault("CHAT")).toBe(DEFAULT_BEDROCK_CHAT_MODEL_ID);
   });
 

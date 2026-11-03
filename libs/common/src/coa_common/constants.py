@@ -302,22 +302,26 @@ DEFAULT_EMBED_DIMENSIONS: int = 1024
 
 
 # ---------------------------------------------------------------------------
-# Text LLM — SINGLE PYTHON SOURCE OF TRUTH for the built-in default
+# Text LLMs — SINGLE PYTHON SOURCE OF TRUTH for the built-in defaults
 # ---------------------------------------------------------------------------
-# Default for every LLM role when the deployment sets no model id: the serve
-# query LLM (BEDROCK_MODEL_ID), ontology induction / description generation
-# (LLM_MODEL_ID, DESCRIPTION_LLM_MODEL_ID) and the chat role for enrichment,
-# constraint inference, document extraction and grounding rerank
-# (BEDROCK_CHAT_MODEL_ID). Amazon Nova Pro, because Anthropic models are not
-# approved for the target GovCloud deployment.
+# Two tiers, mirroring the original Haiku/Sonnet split:
 #
-# The ``us.`` geo profile is only invocable from US commercial regions. Nova Pro
-# has NO GovCloud profile: a us-gov-west-1 deployment must set the bare
-# in-region id ``amazon.nova-pro-v1:0`` in the SSM deploy config.
+# * DEFAULT_LLM_MODEL_ID (OpenAI GPT-5.6 Terra) — the reasoning-heavy roles:
+#   the serve query LLM (BEDROCK_MODEL_ID) and ontology induction / description
+#   generation (LLM_MODEL_ID, DESCRIPTION_LLM_MODEL_ID).
+# * DEFAULT_CHAT_MODEL_ID (OpenAI GPT-5.6 Luna) — the high-volume roles:
+#   enrichment, constraint inference, document extraction and grounding rerank
+#   (BEDROCK_CHAT_MODEL_ID).
+#
+# Both reject ``temperature`` and ``topP`` (ValidationException), so callers
+# must not send them; serve's Bedrock client already learns and drops them per
+# model. Both are invoked through the ``us.`` geo profile only (no on-demand
+# in-region throughput), which is US-commercial only.
 #
 # Must stay in step with libs/ts-shared/src/constants.ts
 # (infra/test/model-id-defaults.test.ts pins the two together).
-DEFAULT_LLM_MODEL_ID: str = "us.amazon.nova-pro-v1:0"
+DEFAULT_LLM_MODEL_ID: str = "us.openai.gpt-5.6-terra"
+DEFAULT_CHAT_MODEL_ID: str = "us.openai.gpt-5.6-luna"
 
 
 # ---------------------------------------------------------------------------

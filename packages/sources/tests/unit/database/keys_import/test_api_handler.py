@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys import: the API Lambda (upload URL, preview, start, get job, list jobs).
 
 S3, DynamoDB and SQS are simulated with moto; the existing sources lookups

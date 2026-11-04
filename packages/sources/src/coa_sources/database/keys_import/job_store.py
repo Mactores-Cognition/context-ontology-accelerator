@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys-import job records, in the feature's own DynamoDB table (decision 8).
 
 Item key: PK = ``SRC#{sourceId}``, SK = job id (``YYYYMMDDTHHMMSSZ-xxxxxxxx``), so a

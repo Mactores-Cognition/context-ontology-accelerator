@@ -1,8 +1,5 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
-// Keys import (add-on): "Import keys (CSV)" button and dialog for a DATABASE
-// source. Plan: work/add-bulk-import.txt, section 2. Flow: choose a CSV ->
+// Keys import (add-on): the "Import keys (CSV)" dialog for a DATABASE source,
+// opened from the source page's "Custom actions" menu (CustomActionsMenu). Plan: work/add-bulk-import.txt, section 2. Flow: choose a CSV ->
 // Check file (upload to S3 + preview, writes nothing) -> Apply (background
 // run) -> progress -> result. Existing keys are never changed or removed.
 
@@ -32,10 +29,9 @@ import {
   useStartKeysImport,
 } from "../../api-hooks/use-keys-import";
 
-export interface KeysImportButtonProps {
-  namespaceId: string;
-  sourceId: string;
-  /** Disable the button (e.g. while the source is scanning or being approved). */
+/** Options for the "Import keys (CSV)" action in the Custom actions menu. */
+export interface KeysImportActionProps {
+  /** Grey out the action (e.g. while the source is scanning or being approved). */
   disabled?: boolean;
   /** Called once when a run finishes, so the page can reload the tables. */
   onImported?: () => void;
@@ -149,8 +145,28 @@ function TableFailures({ failures }: { failures: KeysImportTableFailure[] }) {
   );
 }
 
-function PastImports({ jobs }: { jobs: KeysImportJob[] }) {
-  if (jobs.length === 0) return null;
+function PastImports({
+  jobs,
+  loaded,
+  error,
+}: {
+  jobs: KeysImportJob[];
+  loaded: boolean;
+  error: Error | null;
+}) {
+  // A failed list must not look like an empty one (the first deploy hid an
+  // API error this way).
+  if (error) {
+    return (
+      <Alert type="warning" header="Past imports could not be loaded">
+        {error.message}
+      </Alert>
+    );
+  }
+  if (!loaded) return null;
+  if (jobs.length === 0) {
+    return <Box color="text-status-inactive">No imports yet</Box>;
+  }
   return (
     <Table
       variant="embedded"
@@ -209,12 +225,14 @@ function JobResult({ job }: { job: KeysImportJob }) {
   );
 }
 
-type KeysImportDialogProps = Omit<KeysImportButtonProps, "disabled"> & {
+export type KeysImportDialogProps = Omit<KeysImportActionProps, "disabled"> & {
+  namespaceId: string;
+  sourceId: string;
   onClose: () => void;
 };
 
 /** The dialog and all its API hooks; created only while it is open. */
-function KeysImportDialog({
+export function KeysImportDialog({
   namespaceId,
   sourceId,
   onImported,
@@ -356,31 +374,14 @@ function KeysImportDialog({
         {current && <JobResult job={current} />}
         {job.isError && <Alert type="error">{job.error.message}</Alert>}
 
-        {!jobId && !checked && <PastImports jobs={jobs.data?.items ?? []} />}
+        {!jobId && !checked && (
+          <PastImports
+            jobs={jobs.data?.items ?? []}
+            loaded={jobs.isSuccess}
+            error={jobs.error}
+          />
+        )}
       </SpaceBetween>
     </Modal>
-  );
-}
-
-/**
- * "Import keys (CSV)" button. Uses no API hooks itself: the dialog (and every
- * API call) exists only while it is open, so the source page is unchanged
- * while it is closed (a closed Cloudscape Modal would still render a hidden
- * role="dialog").
- */
-export function KeysImportButton({
-  disabled,
-  ...dialogProps
-}: KeysImportButtonProps) {
-  const [visible, setVisible] = useState(false);
-  return (
-    <>
-      <Button onClick={() => setVisible(true)} disabled={disabled}>
-        Import keys (CSV)
-      </Button>
-      {visible && (
-        <KeysImportDialog {...dialogProps} onClose={() => setVisible(false)} />
-      )}
-    </>
   );
 }

@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys import: job records (work/add-bulk-import.txt, section 3.6, J1-J3)."""
 
 from __future__ import annotations

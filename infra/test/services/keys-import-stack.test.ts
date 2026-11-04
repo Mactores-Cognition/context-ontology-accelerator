@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // Keys import (add-on) stack. Expected results: work/add-bulk-import.txt,
 // section 3.6 (K1-K8).
 
@@ -19,7 +16,8 @@ jest.mock("../../lib/utils/python-bundling", () => ({
 const TEST_ENV = { account: "123456789012", region: "us-east-1" };
 const TEST_CONTEXT = { "aws:cdk:bundling-stacks": [] };
 const API_HANDLER = "coa_sources.database.keys_import.api_handler.handler";
-const WORKER_HANDLER = "coa_sources.database.keys_import.worker_handler.handler";
+const WORKER_HANDLER =
+  "coa_sources.database.keys_import.worker_handler.handler";
 
 function synth(enabled: boolean): Template {
   const app = new cdk.App({ context: TEST_CONTEXT });
@@ -190,7 +188,9 @@ describe("KeysImportStack (enabled)", () => {
     const sourcesWrites = statementsFor(template, API_HANDLER).filter(
       (s) =>
         JSON.stringify(s.Resource).includes("sourcestablename") &&
-        [].concat(s.Action).some((a: string) => /Put|Update|Delete|Write/.test(a)),
+        []
+          .concat(s.Action)
+          .some((a: string) => /Put|Update|Delete|Write/.test(a)),
     );
     expect(sourcesWrites).toEqual([]);
   });
@@ -243,5 +243,27 @@ describe("KeysImportStack (switched off)", () => {
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: "/coa/keys-import/api-fn-arn",
     });
+  });
+});
+
+describe("KeysImportStack (CORS origin)", () => {
+  // Found on the first deploy: coa_common.response.api_response raises without
+  // ALLOWED_ORIGIN, so every API call answered "Internal server error". The worker
+  // needs it too: it saves keys through the existing handler, which uses api_response.
+  test("K9 every Lambda gets ALLOWED_ORIGIN (on and off)", () => {
+    for (const enabled of [true, false]) {
+      const template = synth(enabled);
+      const fns = Object.values(
+        template.findResources("AWS::Lambda::Function", {
+          Properties: { Handler: Match.stringLikeRegexp("keys_import") },
+        }),
+      );
+      expect(fns).toHaveLength(enabled ? 2 : 1);
+      for (const fn of fns as any[]) {
+        expect(fn.Properties.Environment.Variables.ALLOWED_ORIGIN).toBe(
+          "https://ui.example.com",
+        );
+      }
+    }
   });
 });

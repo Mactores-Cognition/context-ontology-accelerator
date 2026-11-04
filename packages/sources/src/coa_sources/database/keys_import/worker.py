@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Apply a keys-import plan table by table through the existing per-table key code.
 
 Decision 6 (work/add-bulk-import.txt, section 2.1): keys are saved by calling the

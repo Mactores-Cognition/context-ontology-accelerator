@@ -1,5 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
 // @examples for com.amazon.semanticcontext.keysimport operations.
 // Kept apart from the operation definitions, as in the other *-examples.smithy
 // files; `apply` merges the @examples trait back onto each operation, so the

@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys import: reading the CSV file (work/add-bulk-import.txt, section 2.3).
 
 Expected results are tracked in work/add-bulk-import.txt, section 3 (R1-R17).

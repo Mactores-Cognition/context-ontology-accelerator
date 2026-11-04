@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Check keys-import rows against a source's tables and plan what to add.
 
 Rules (work/add-bulk-import.txt, section 2.4):

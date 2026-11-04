@@ -60,7 +60,7 @@ import { sourceStatusType, sourceStatusLabel } from "@utils/source-status";
 import { formatTimestamp } from "@utils/helpers";
 import { tableDetailPath } from "@utils/routes";
 // Keys import (add-on): self-contained button + dialog.
-import { KeysImportButton } from "@components/KeysImport/KeysImportButton";
+import { CustomActionsMenu } from "@components/CustomActions/CustomActionsMenu";
 
 const TABLES_PAGE_SIZE = 25;
 const METADATA_FRESHNESS_THRESHOLD_DAYS = 30;
@@ -532,35 +532,36 @@ export const SourceDetail: React.FC = () => {
             </Button>
             {isDatabase && (
               <>
-                <KeysImportButton
+                <CustomActionsMenu
                   namespaceId={namespaceId ?? ""}
                   sourceId={sourceId ?? ""}
-                  disabled={
-                    isTransient ||
-                    tables.length === 0 ||
-                    ![
-                      SourceStatus.PENDING_REVIEW,
-                      SourceStatus.RESCAN_REVIEW,
-                      SourceStatus.APPROVED,
-                      SourceStatus.APPROVAL_FAILED,
-                      SourceStatus.REJECTION_FAILED,
-                    ].some((s) => s === status)
-                  }
-                  onImported={() => {
-                    queryClient.invalidateQueries({
-                      queryKey: [
-                        "sourceTables",
-                        namespaceId ?? "",
-                        sourceId ?? "",
-                      ],
-                    });
-                    queryClient.invalidateQueries({
-                      queryKey: [
-                        "sourceTable",
-                        namespaceId ?? "",
-                        sourceId ?? "",
-                      ],
-                    });
+                  keysImport={{
+                    disabled:
+                      isTransient ||
+                      tables.length === 0 ||
+                      ![
+                        SourceStatus.PENDING_REVIEW,
+                        SourceStatus.RESCAN_REVIEW,
+                        SourceStatus.APPROVED,
+                        SourceStatus.APPROVAL_FAILED,
+                        SourceStatus.REJECTION_FAILED,
+                      ].some((s) => s === status),
+                    onImported: () => {
+                      queryClient.invalidateQueries({
+                        queryKey: [
+                          "sourceTables",
+                          namespaceId ?? "",
+                          sourceId ?? "",
+                        ],
+                      });
+                      queryClient.invalidateQueries({
+                        queryKey: [
+                          "sourceTable",
+                          namespaceId ?? "",
+                          sourceId ?? "",
+                        ],
+                      });
+                    },
                   }}
                 />
                 <ButtonWithHint

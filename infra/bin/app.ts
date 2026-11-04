@@ -48,6 +48,8 @@ import {
   SourcesStack,
   VkgStack,
 } from "../lib/stacks/services";
+// Keys import (add-on): imported directly so removing the feature touches no index file.
+import { KeysImportStack } from "../lib/stacks/services/keys-import-stack";
 
 const app = new cdk.App();
 
@@ -347,6 +349,11 @@ async function deploy(): Promise<void> {
       "/namespaces/{namespaceId}/sources/{sourceId}/event-rescan": `/${prefix}/sources/api-fn-arn`,
       "/namespaces/{namespaceId}/sources/{sourceId}/metadata": `/${prefix}/sources/api-fn-arn`,
       "/namespaces/{namespaceId}/sources/upload-urls": `/${prefix}/sources/api-fn-arn`,
+      // Keys import (add-on): KeysImportStack publishes this ARN, also when switched off.
+      "/namespaces/{namespaceId}/sources/{sourceId}/keys-import": `/${prefix}/keys-import/api-fn-arn`,
+      "/namespaces/{namespaceId}/sources/{sourceId}/keys-import/upload-url": `/${prefix}/keys-import/api-fn-arn`,
+      "/namespaces/{namespaceId}/sources/{sourceId}/keys-import/preview": `/${prefix}/keys-import/api-fn-arn`,
+      "/namespaces/{namespaceId}/sources/{sourceId}/keys-import/{jobId}": `/${prefix}/keys-import/api-fn-arn`,
       "/roles": `/${prefix}/namespace/platform-roles-api-fn-arn`,
       "/namespaces/{namespaceId}/roles": `/${prefix}/namespace/roles-api-fn-arn`,
       "/namespaces/{namespaceId}/roles/{roleId}": `/${prefix}/namespace/roles-api-fn-arn`,
@@ -458,6 +465,19 @@ async function deploy(): Promise<void> {
   sources.addDependency(smusDomain); // needs SSM params from namespace stack
   sources.addDependency(storage); // needs Neptune/OpenSearch endpoints
   sources.addDependency(serve); // needs /{env}/serve/runtime-role-arn SSM param (LF consumer grant)
+
+  // Keys import (add-on). Context keys_import_enabled=false deploys only an API
+  // Lambda that answers "not enabled" (the routes stay wired for the API stack).
+  const keysImport = new KeysImportStack(app, `${stackPrefix}-keys-import`, {
+    vpc: network.vpc,
+    lambdaSecurityGroup: network.lambdaSecurityGroup,
+    allowedOrigin,
+    enabled:
+      String(app.node.tryGetContext("keys_import_enabled") ?? "true") !== "false",
+  });
+  keysImport.addDependency(sources); // /sources/sources-table-name SSM param
+  keysImport.addDependency(smusDomain); // /namespace/namespaces-table-name, /smus/* SSM params
+  api.addDependency(keysImport); // /keys-import/api-fn-arn SSM param
 
   api.addDependency(sources);
   api.addDependency(metricService);

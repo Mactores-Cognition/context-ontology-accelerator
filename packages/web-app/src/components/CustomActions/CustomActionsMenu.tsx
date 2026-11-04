@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // "Custom actions" menu on the source page: add-on actions that are not part of
 // standard COA, kept together so they are easy to tell apart (and to remove).
 // To add an action: one item below plus the dialog it opens.

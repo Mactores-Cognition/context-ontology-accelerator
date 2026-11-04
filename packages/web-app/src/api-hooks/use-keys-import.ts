@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // Keys import (add-on): hooks for the keys-import routes (keys-import.smithy).
 // Imported directly by the KeysImport component rather than through
 // api-hooks/index.ts, so removing the feature touches no shared file.

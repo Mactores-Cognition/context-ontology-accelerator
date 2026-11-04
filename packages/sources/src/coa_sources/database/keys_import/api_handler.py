@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys-import API Lambda (its own function; routes in keys-import.smithy).
 
 Routes (all under /namespaces/{namespaceId}/sources/{sourceId}/keys-import):

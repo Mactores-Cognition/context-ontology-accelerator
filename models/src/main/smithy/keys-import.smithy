@@ -1,5 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
 // Keys import — add primary keys and foreign keys to a DATABASE source's tables
 // from a CSV file. A separate add-on (plan: work/add-bulk-import.txt, section 2):
 // it only adds keys and saves them through the existing per-table key handler

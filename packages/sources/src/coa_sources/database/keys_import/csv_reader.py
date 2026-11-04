@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Read a keys-import CSV into rows, with per-row errors a steward can act on.
 
 Format (one row per key, header required, any column order, extra columns ignored)::

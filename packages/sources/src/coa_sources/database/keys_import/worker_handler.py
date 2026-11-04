@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys-import worker Lambda: one SQS message per run (sent by StartKeysImport).
 
 For each message: load the run, read the CSV from S3, plan against the source's

@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys import: the worker Lambda entry point (SQS message -> run -> job results).
 
 S3, DynamoDB and SQS are simulated with moto; reading and saving tables use

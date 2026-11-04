@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys import: contract with the existing, unchanged per-table key code.
 
 Decision 6 (work/add-bulk-import.txt, section 2.1): the worker saves keys by

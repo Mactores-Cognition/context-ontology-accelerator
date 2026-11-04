@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // Keys import (add-on) stack. Expected results: work/add-bulk-import.txt,
 // section 3.6 (K1-K8).
 

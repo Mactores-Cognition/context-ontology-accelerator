@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // Keys import (add-on): the dialog, opened from the source page's "Custom actions"
 // menu (CustomActionsMenu).
 // Expected results: work/add-bulk-import.txt, section 3.6 (U1-U11).

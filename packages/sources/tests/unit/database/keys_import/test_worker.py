@@ -1,6 +1,3 @@
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Keys import: the worker that applies a plan table by table.
 
 Decisions 6 and 9 (work/add-bulk-import.txt, section 2.1): the worker saves

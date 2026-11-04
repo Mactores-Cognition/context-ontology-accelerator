@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // Bedrock guardrails on/off switch: `-c guardrails_enabled=false` on the deploy
 // command turns the guardrails off in every part of COA that uses them; the
 // default (no key) keeps them on. Expected results G1-G6.

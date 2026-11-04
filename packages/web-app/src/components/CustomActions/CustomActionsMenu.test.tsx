@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // "Custom actions" menu on the source page (add-on actions that are not part of
 // standard COA). Expected results: work/add-bulk-import.txt, section 3.6 (M1-M4).
 

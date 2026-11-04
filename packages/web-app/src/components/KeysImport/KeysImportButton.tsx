@@ -1,6 +1,3 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
 // Keys import (add-on): the "Import keys (CSV)" dialog for a DATABASE source,
 // opened from the source page's "Custom actions" menu (CustomActionsMenu). Plan: work/add-bulk-import.txt, section 2. Flow: choose a CSV ->
 // Check file (upload to S3 + preview, writes nothing) -> Apply (background

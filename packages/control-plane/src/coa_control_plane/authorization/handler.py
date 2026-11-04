@@ -539,6 +539,22 @@ _PATH_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
     "/namespaces/{namespaceId}/sources/{sourceId}/tables/{tableId}/keep": {
         "PUT": ("manageSource", "Source"),
     },
+    # Keys import (add-on): add keys to a source's tables from a CSV file.
+    # Uploading, previewing and starting change keys → manageSource (as PATCH .../keys);
+    # reading runs → viewNamespace (as GET .../tables).
+    "/namespaces/{namespaceId}/sources/{sourceId}/keys-import/upload-url": {
+        "POST": ("manageSource", "Source"),
+    },
+    "/namespaces/{namespaceId}/sources/{sourceId}/keys-import/preview": {
+        "POST": ("manageSource", "Source"),
+    },
+    "/namespaces/{namespaceId}/sources/{sourceId}/keys-import": {
+        "POST": ("manageSource", "Source"),
+        "GET": ("viewNamespace", "Source"),
+    },
+    "/namespaces/{namespaceId}/sources/{sourceId}/keys-import/{jobId}": {
+        "GET": ("viewNamespace", "Source"),
+    },
     # ── Metric service ─────────────────────────────────────────────────
     # Reads → readMetric; authoring/writes → manageMetric.
     "/namespaces/{namespaceId}/metrics": {

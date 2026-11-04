@@ -16,6 +16,11 @@ use com.amazon.semanticcontext.grant#DeletePlatformGrant
 use com.amazon.semanticcontext.grant#ListNamespaceGrants
 use com.amazon.semanticcontext.grant#ListPlatformGrants
 use com.amazon.semanticcontext.grant#ListPrincipalGrants
+use com.amazon.semanticcontext.keysimport#GetKeysImportJob
+use com.amazon.semanticcontext.keysimport#GetKeysImportUploadUrl
+use com.amazon.semanticcontext.keysimport#ListKeysImportJobs
+use com.amazon.semanticcontext.keysimport#PreviewKeysImport
+use com.amazon.semanticcontext.keysimport#StartKeysImport
 use com.amazon.semanticcontext.metric#BulkDeleteMetrics
 use com.amazon.semanticcontext.metric#CreateMetric
 use com.amazon.semanticcontext.metric#DeleteMetric
@@ -170,6 +175,12 @@ service ControlPlaneService {
         PutSourceRescanSchedule
         PutSourceEventRescan
         UpdateSourceMetadata
+        // Keys import (add-on): add keys to a source's tables from a CSV file
+        GetKeysImportUploadUrl
+        PreviewKeysImport
+        StartKeysImport
+        GetKeysImportJob
+        ListKeysImportJobs
         // ── Metric service ──────────────────────────────────────────────
         CreateMetric
         GetMetric

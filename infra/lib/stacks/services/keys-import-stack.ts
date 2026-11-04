@@ -142,7 +142,11 @@ export class KeysImportStack extends SCLStack {
       requirementsFile: fromRoot("packages/sources/requirements.txt"),
       architecture: "arm64",
     });
+    // coa_common.response.api_response needs it for every HTTP answer (the worker
+    // too: it saves keys through the existing handler, which uses api_response).
+    const allowedOrigin = props.allowedOrigin ?? "*";
     const sharedEnv = {
+      ALLOWED_ORIGIN: allowedOrigin,
       SOURCES_TABLE: sourcesTableName,
       NAMESPACES_TABLE: namespacesTableName,
       RESOURCE_PREFIX: this.prefixed(""),
@@ -164,7 +168,10 @@ export class KeysImportStack extends SCLStack {
         timeout: cdk.Duration.seconds(30),
         memorySize: 256,
         ...lambdaPlacement,
-        environment: { KEYS_IMPORT_ENABLED: "false" },
+        environment: {
+          ALLOWED_ORIGIN: allowedOrigin,
+          KEYS_IMPORT_ENABLED: "false",
+        },
       });
       this.publishApiArn(ssmPrefix);
       return;
@@ -187,7 +194,7 @@ export class KeysImportStack extends SCLStack {
       autoDeleteObjects: true,
       cors: [
         {
-          allowedOrigins: [props.allowedOrigin ?? "*"],
+          allowedOrigins: [allowedOrigin],
           allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET],
           allowedHeaders: ["Content-Type"],
           maxAge: 3600,

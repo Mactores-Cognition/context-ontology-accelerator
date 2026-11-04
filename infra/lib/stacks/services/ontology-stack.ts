@@ -40,6 +40,7 @@ import {
   DEFAULT_BEDROCK_INDUCTION_MODEL_ID,
 } from "../../constants";
 import { TABLE_NAMES } from "@coa/shared";
+import { guardrailsEnabled } from "../../utils/guardrails";
 
 /**
  * Container port where ontology-engine serves HTTPS for the internal ALB
@@ -314,7 +315,10 @@ export class OntologyStack extends SCLStack {
         LLM_REGION: cdk.Aws.REGION,
         // SSM path to the Bedrock guardrail id — the app resolves it at runtime
         // and applies content filtering to LLM calls (constraint inference).
-        GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/guardrail-id`,
+        // Left out when guardrails are switched off (-c guardrails_enabled=false).
+        ...(guardrailsEnabled(this, this.envName) && {
+          GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/guardrail-id`,
+        }),
         CATALOG_SOURCE: "smus",
         ...(metadataAssetsTable
           ? {

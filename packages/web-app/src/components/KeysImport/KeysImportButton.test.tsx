@@ -1,8 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Keys import (add-on): button + dialog on the source page.
-// Expected results: work/add-bulk-import.txt, section 3.6 (U1-U9).
+// Keys import (add-on): the dialog, opened from the source page's "Custom actions"
+// menu (CustomActionsMenu).
+// Expected results: work/add-bulk-import.txt, section 3.6 (U1-U11).
 
 import {
   fireEvent,
@@ -14,7 +15,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { KeysImportButton } from "./KeysImportButton";
+import { CustomActionsMenu } from "@components/CustomActions/CustomActionsMenu";
+import type { KeysImportActionProps } from "./KeysImportButton";
 
 vi.mock("@coa/control-plane-client", () => {
   const command = (name: string) =>
@@ -105,9 +107,7 @@ const defaultHandlers: Handlers = {
 const user = userEvent.setup({ delay: null });
 const fetchMock = vi.fn();
 
-function renderButton(
-  props: Partial<Parameters<typeof KeysImportButton>[0]> = {},
-) {
+function renderButton(props: Partial<KeysImportActionProps> = {}) {
   const onImported = vi.fn();
   render(
     <QueryClientProvider
@@ -115,23 +115,29 @@ function renderButton(
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      <KeysImportButton
+      <CustomActionsMenu
         namespaceId="ns-1"
         sourceId="src-1"
-        onImported={onImported}
-        pollIntervalMs={10}
-        {...props}
+        keysImport={{ onImported, pollIntervalMs: 10, ...props }}
       />
     </QueryClientProvider>,
   );
   return { onImported };
 }
 
+/** Opens the import dialog the way a user does: Custom actions > Import keys (CSV). */
+async function openDialog() {
+  await user.click(screen.getByRole("button", { name: "Custom actions" }));
+  await user.click(
+    await screen.findByRole("menuitem", { name: /Import keys \(CSV\)/ }),
+  );
+  return screen.findByRole("dialog");
+}
+
 async function openAndCheck(
   text = "type,source_table,column,target_table,target_column\n",
 ) {
-  await user.click(screen.getByRole("button", { name: "Import keys (CSV)" }));
-  const dialog = await screen.findByRole("dialog");
+  const dialog = await openDialog();
   const input = dialog.querySelector('input[type="file"]') as HTMLInputElement;
   // Same workaround as ConnectSource.test.tsx: Cloudscape assigns `input.files`,
   // which happy-dom exposes as getter-only (and user.upload hits the same wall).
@@ -156,13 +162,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("KeysImportButton", () => {
-  it("U1 shows the button and calls no API until it is opened; disabled when asked", () => {
+describe("Keys import dialog", () => {
+  it("U1 the menu item calls no API until chosen; greyed out when asked", async () => {
     route(defaultHandlers);
     renderButton({ disabled: true });
+    await user.click(screen.getByRole("button", { name: "Custom actions" }));
     expect(
-      screen.getByRole("button", { name: "Import keys (CSV)" }),
-    ).toBeDisabled();
+      await screen.findByRole("menuitem", { name: /Import keys \(CSV\)/ }),
+    ).toHaveAttribute("aria-disabled", "true");
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -172,8 +179,7 @@ describe("KeysImportButton", () => {
       ListKeysImportJobs: () => ({ items: [DONE_JOB] }),
     });
     renderButton();
-    await user.click(screen.getByRole("button", { name: "Import keys (CSV)" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await openDialog();
     expect(await within(dialog).findByText("keys.csv")).toBeInTheDocument();
     expect(within(dialog).getByText("Completed")).toBeInTheDocument();
   });
@@ -333,5 +339,39 @@ describe("KeysImportButton", () => {
         ),
       ).toBeInTheDocument(),
     );
+  });
+
+  it("U10 a failed past-imports list shows a warning; Check file still works", async () => {
+    route({
+      ...defaultHandlers,
+      ListKeysImportJobs: () => {
+        throw new Error("Internal server error");
+      },
+    });
+    renderButton();
+    const dialog = await openDialog();
+    expect(
+      await within(dialog).findByText("Past imports could not be loaded"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Internal server error"),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText("No imports yet")).toBeNull();
+    // Opening again starts a fresh dialog; the check itself still runs.
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    const checked = await openAndCheck();
+    expect(await within(checked).findByText("To add")).toBeInTheDocument();
+  });
+
+  it("U11 an empty past-imports list says so", async () => {
+    route(defaultHandlers);
+    renderButton();
+    const dialog = await openDialog();
+    expect(
+      await within(dialog).findByText("No imports yet"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("Past imports could not be loaded"),
+    ).toBeNull();
   });
 });

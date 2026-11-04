@@ -43,6 +43,7 @@ import { bedrockModelArn } from "../../utils/bedrock-utils";
 import { NetworkStack } from "../foundation/network-stack";
 import { StorageStack } from "../foundation/storage-stack";
 import { TABLE_NAMES } from "@coa/shared";
+import { guardrailsEnabled } from "../../utils/guardrails";
 import {
   SourceStatus,
   CONNECTOR_TAG_KEY,
@@ -1348,7 +1349,10 @@ export class SourcesStack extends SCLStack {
         // Without this the enrichment task's Bedrock calls run UNGUARDED —
         // table_enricher._resolve_guardrail_id() reads this param name to look
         // up the guardrail id. Same param the ontology task reads (#111 AC5).
-        GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/retrieval-guardrail-id`,
+        // Left out when guardrails are switched off (-c guardrails_enabled=false).
+        ...(guardrailsEnabled(this, this.envName) && {
+          GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/retrieval-guardrail-id`,
+        }),
         // Model for table enrichment. The container previously set NO model id,
         // so the shared BedrockClient default (a `us.` profile) always won and
         // enrichment was unreachable from a non-US deploy (#94).
@@ -2277,16 +2281,19 @@ export class SourcesStack extends SCLStack {
         // models (GPT-5.6 Luna) have room for reasoning plus the answer.
         EXTRACTION_MAX_TOKENS: "32768",
         // Content screening: retrieval guardrail for ingestion-time ApplyGuardrail
-        // (SDO-188). Empty string disables screening gracefully.
-        RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(
-          this,
-          `${ssmPrefix}/bedrock/retrieval-guardrail-id`,
-        ),
-        RETRIEVAL_GUARDRAIL_VERSION:
-          ssm.StringParameter.valueForStringParameter(
+        // (SDO-188). Empty string disables screening gracefully. Left out when
+        // guardrails are switched off (-c guardrails_enabled=false).
+        ...(guardrailsEnabled(this, this.envName) && {
+          RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(
             this,
-            `${ssmPrefix}/bedrock/retrieval-guardrail-version`,
+            `${ssmPrefix}/bedrock/retrieval-guardrail-id`,
           ),
+          RETRIEVAL_GUARDRAIL_VERSION:
+            ssm.StringParameter.valueForStringParameter(
+              this,
+              `${ssmPrefix}/bedrock/retrieval-guardrail-version`,
+            ),
+        }),
         // Smaller bulk embedding writes so each AOSS _bulk request reserves less
         // JVM heap — avoids tripping the NEXTGEN parent circuit breaker
         // (429 circuit_breaking_exception) on large doc corpora at low OCU.

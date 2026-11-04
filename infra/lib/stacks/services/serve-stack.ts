@@ -39,6 +39,7 @@ import {
   DEFAULT_GRAPH_URI_BASE,
 } from "../../constants";
 import { TABLE_NAMES } from "@coa/shared";
+import { guardrailsEnabled } from "../../utils/guardrails";
 
 export interface ServeStackProps extends cdk.StackProps {
   /** VPC for AgentCore Runtime network interfaces. */
@@ -564,25 +565,30 @@ export class ServeStack extends SCLStack {
           // environment unless that bypass is also true (it is, for every env but
           // prod). A Tier-2 benchmark never reaches Tier-3, so this matters only if
           // you point document questions at the same stack.
-          ...(this.node.tryGetContext("serve_guardrails_disabled") !==
-            undefined && {
-            SERVE_GUARDRAILS_DISABLED: (() => {
-              const raw = String(
-                this.node.tryGetContext("serve_guardrails_disabled"),
-              );
-              // Same truthy set serve's config._guardrails_disabled() accepts, so
-              // the guard cannot be sidestepped with a spelling it honours.
-              const optIn = ["1", "true", "on", "yes"].includes(
-                raw.trim().toLowerCase(),
-              );
-              if (optIn && this.envName === "prod") {
-                throw new Error(
-                  "SERVE_GUARDRAILS_DISABLED cannot be enabled in prod",
-                );
-              }
-              return raw;
-            })(),
-          }),
+          //
+          // The deployment-wide switch (-c guardrails_enabled=false, refused in
+          // prod by guardrailsEnabled) sets the same variable to "true".
+          ...(!guardrailsEnabled(this, this.envName)
+            ? { SERVE_GUARDRAILS_DISABLED: "true" }
+            : this.node.tryGetContext("serve_guardrails_disabled") !==
+                undefined && {
+                SERVE_GUARDRAILS_DISABLED: (() => {
+                  const raw = String(
+                    this.node.tryGetContext("serve_guardrails_disabled"),
+                  );
+                  // Same truthy set serve's config._guardrails_disabled() accepts, so
+                  // the guard cannot be sidestepped with a spelling it honours.
+                  const optIn = ["1", "true", "on", "yes"].includes(
+                    raw.trim().toLowerCase(),
+                  );
+                  if (optIn && this.envName === "prod") {
+                    throw new Error(
+                      "SERVE_GUARDRAILS_DISABLED cannot be enabled in prod",
+                    );
+                  }
+                  return raw;
+                })(),
+              }),
           // Tier-2 flat NL→SQL: append the tables one induced FK hop out from the
           // retrieved ones. On in the code default, so this key exists to turn it
           // OFF (`-c serve_nl2sql_graph_expand=false`) or to pin it explicitly —

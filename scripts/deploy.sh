@@ -67,6 +67,8 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_SERVICE_DOMAIN:-}" ] && CONTEXT="$CONTEXT --context service_domain=$SCL_SERVICE_DOMAIN"
 [ -n "${SCL_PUBLIC_ZONE_ID:-}" ] && CONTEXT="$CONTEXT --context public_zone_id=$SCL_PUBLIC_ZONE_ID"
 [ -n "${SCL_SERVICE_CERT_ARN:-}" ] && CONTEXT="$CONTEXT --context service_cert_arn=$SCL_SERVICE_CERT_ARN"
+# Bedrock guardrails: on unless SCL_GUARDRAILS_ENABLED=false (refused for env=prod).
+[ -n "${SCL_GUARDRAILS_ENABLED:-}" ] && CONTEXT="$CONTEXT --context guardrails_enabled=$SCL_GUARDRAILS_ENABLED"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────
 # NamespaceStack falls back to arn:aws:iam::<account>:role/Admin when

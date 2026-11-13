@@ -53,7 +53,7 @@ DEFAULT_MODEL_ID = resolve_chat_model_id()
 _DEFAULT_READ_TIMEOUT = 90
 _DEFAULT_GUARDRAIL_VERSION = "DRAFT"
 
-_DEFAULT_MAX_INPUT_CHARS = 200_000
+_DEFAULT_MAX_INPUT_CHARS = 800_000
 
 _GUARDRAIL_POLICY_PATHS = [
     ("topicPolicy", "topics"),
@@ -172,7 +172,7 @@ class BedrockClient:
         read_timeout: HTTP read timeout in seconds (default 90).
         guardrail_id: Optional Bedrock Guardrail identifier.
         guardrail_version: Guardrail version (default DRAFT).
-        max_input_chars: Maximum combined prompt length in characters (default 200,000).
+        max_input_chars: Maximum combined prompt length in characters (default 800,000).
             Requests exceeding this raise InputTooLargeError.
         component: ``Component`` dimension for the guardrail decision metrics
             (#111 AC10). Both consumers of this client run as ECS Fargate tasks,

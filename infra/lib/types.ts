@@ -58,6 +58,11 @@ export interface IdpAuthenticationStackProps extends cdk.StackProps {
   readonly oidcProviders?: cognito.UserPoolIdentityProviderOidcProps[];
   /** Refresh token validity duration. @default cdk.Duration.hours(12) */
   readonly refreshTokenValidity?: cdk.Duration;
+  /** Amazon Quick OAuth redirect URLs added to the MCP app client's callback
+   *  URLs (COGNITO/SAML), e.g.
+   *  "https://us-east-1.quicksight.aws.amazon.com/sn/oauthcallback".
+   *  @default none */
+  readonly quickRedirectUrls?: string[];
 }
 
 // ── Custom domains ─────────────────────────────────────────────────
@@ -121,6 +126,9 @@ export interface SsmConfig {
   readonly attributeMapping?: Record<string, string>;
   /** Refresh token validity in hours. @default 12 */
   readonly refreshTokenValidityHours?: number;
+  /** Amazon Quick OAuth redirect URLs (one per Quick Region in use) allowed on
+   *  the MCP app client, for Quick's MCP integration (user authentication). */
+  readonly quickRedirectUrls?: string[];
   /** Custom domain for the web app. */
   readonly customDomain?: string;
 

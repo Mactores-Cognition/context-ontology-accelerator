@@ -5,7 +5,7 @@ import * as cdk from "aws-cdk-lib";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { IdpAuthenticationStack } from "../../lib/stacks/foundation";
-import { IdpType } from "../../lib/types";
+import { IdpType, SsmConfig } from "../../lib/types";
 import { DEFAULT_RESOURCE_PREFIX, DEFAULT_ENV } from "../../lib/constants";
 
 const TEST_CONTEXT = {
@@ -387,5 +387,180 @@ describe("IdpAuthenticationStack (hosted-UI domain prefix, issue #130)", () => {
 
     expect(param).toBeDefined();
     expect(param!.Properties.Value).toEqual(domain.Properties.Domain);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// IdpAuthenticationStack — Amazon Quick (MCP client redirect URL and
+// access-token claims for MCP clients that use OAuth)
+// ═══════════════════════════════════════════════════════════════════
+const MCP_CLIENT_NAME = `${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}-mcp-client`;
+const LOCALHOST_CALLBACK = "http://localhost:9876/oauth/callback";
+const QUICK_REDIRECT_URL =
+  "https://us-east-1.quicksight.aws.amazon.com/sn/oauthcallback";
+const MCP_CLIENT_ID_PARAM = `/${DEFAULT_RESOURCE_PREFIX}/mcp-client-id`;
+
+function preTokenGenerationFunctions(template: Template) {
+  return template.findResources("AWS::Lambda::Function", {
+    Properties: {
+      Environment: { Variables: { MCP_CLIENT_ID_PARAM: Match.anyValue() } },
+    },
+  });
+}
+
+describe("IdpAuthenticationStack (Amazon Quick)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    template = Template.fromStack(new IdpAuthenticationStack(app, "Quick"));
+  });
+
+  test("MCP client keeps only the localhost callback by default", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
+      ClientName: MCP_CLIENT_NAME,
+      CallbackURLs: [LOCALHOST_CALLBACK],
+    });
+  });
+
+  test("MCP client also allows the Quick redirect URLs when configured", () => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    const withQuick = Template.fromStack(
+      new IdpAuthenticationStack(app, "QuickUrls", {
+        quickRedirectUrls: [QUICK_REDIRECT_URL],
+      }),
+    );
+    withQuick.hasResourceProperties("AWS::Cognito::UserPoolClient", {
+      ClientName: MCP_CLIENT_NAME,
+      CallbackURLs: [LOCALHOST_CALLBACK, QUICK_REDIRECT_URL],
+    });
+  });
+
+  test("throws when a Quick redirect URL is not HTTPS", () => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    expect(
+      () =>
+        new IdpAuthenticationStack(app, "QuickHttp", {
+          quickRedirectUrls: ["http://quick.example.com/sn/oauthcallback"],
+        }),
+    ).toThrow("quickRedirectUrls must be HTTPS URLs");
+  });
+
+  test("fromSsmConfig passes quickRedirectUrls through", () => {
+    const cfg: SsmConfig = { quickRedirectUrls: [QUICK_REDIRECT_URL] };
+    expect(IdpAuthenticationStack.fromSsmConfig(cfg).quickRedirectUrls).toEqual(
+      [QUICK_REDIRECT_URL],
+    );
+  });
+
+  test("user pool has the pre-token-generation trigger, event version V2_0", () => {
+    template.hasResourceProperties("AWS::Cognito::UserPool", {
+      LambdaConfig: {
+        PreTokenGenerationConfig: {
+          LambdaVersion: "V2_0",
+          LambdaArn: Match.anyValue(),
+        },
+      },
+    });
+  });
+
+  test("pre-token-generation Lambda reads the MCP client ID parameter", () => {
+    const fns = Object.values(preTokenGenerationFunctions(template));
+    expect(fns).toHaveLength(1);
+    expect(fns[0].Properties).toMatchObject({
+      Runtime: "python3.12",
+      Handler: "index.handler",
+      Environment: { Variables: { MCP_CLIENT_ID_PARAM } },
+    });
+  });
+
+  test("pre-token-generation Lambda has 256 MB (cold start well within Cognito's 5 s limit)", () => {
+    // At 128 MB the cold start (boto3 client + SSM read) took 2.1 to 2.6 s.
+    const fns = Object.values(preTokenGenerationFunctions(template));
+    expect(fns[0].Properties.MemorySize).toBe(256);
+  });
+
+  test("pre-token-generation Lambda logs to its own log group: 1 month, deleted with the stack", () => {
+    const [fnId] = Object.keys(preTokenGenerationFunctions(template));
+    const fn = template.toJSON().Resources[fnId];
+    const logGroupId = fn.Properties.LoggingConfig?.LogGroup?.Ref;
+    expect(logGroupId).toBeDefined();
+    const logGroup = template.toJSON().Resources[logGroupId];
+    expect(logGroup.Type).toBe("AWS::Logs::LogGroup");
+    expect(logGroup.Properties.RetentionInDays).toBe(30);
+    expect(logGroup.DeletionPolicy).toBe("Delete");
+  });
+
+  test("Cognito (this user pool only) may invoke the pre-token-generation Lambda", () => {
+    const [fnId] = Object.keys(preTokenGenerationFunctions(template));
+    const [poolId] = Object.keys(
+      template.findResources("AWS::Cognito::UserPool"),
+    );
+    template.hasResourceProperties("AWS::Lambda::Permission", {
+      Action: "lambda:InvokeFunction",
+      Principal: "cognito-idp.amazonaws.com",
+      FunctionName: { "Fn::GetAtt": [fnId, "Arn"] },
+      SourceArn: { "Fn::GetAtt": [poolId, "Arn"] },
+    });
+  });
+
+  test("pre-token-generation Lambda can read the MCP client ID parameter", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const statements = Object.values(policies).flatMap(
+      (p) => p.Properties.PolicyDocument.Statement,
+    );
+    const ssmRead = statements.filter((s) => s.Action === "ssm:GetParameter");
+    expect(ssmRead).toHaveLength(1);
+    expect(JSON.stringify(ssmRead[0].Resource)).toContain(
+      `parameter${MCP_CLIENT_ID_PARAM}`,
+    );
+  });
+
+  test("template has no dependency cycle (trigger, role policy, SSM parameter, MCP client)", () => {
+    // CloudFormation rejects a cycle only at deploy time; synth doesn't.
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const refs = (node: unknown, out: Set<string>): Set<string> => {
+      if (Array.isArray(node)) node.forEach((n) => refs(n, out));
+      else if (node && typeof node === "object") {
+        for (const [k, v] of Object.entries(node)) {
+          if (k === "Ref" && typeof v === "string" && v in resources)
+            out.add(v);
+          else if (k === "Fn::GetAtt" && Array.isArray(v) && v[0] in resources)
+            out.add(v[0]);
+          else refs(v, out);
+        }
+      }
+      return out;
+    };
+    const edges = Object.fromEntries(
+      Object.entries(resources).map(([id, r]) => {
+        const deps = refs(r.Properties ?? {}, new Set<string>());
+        [r.DependsOn ?? []].flat().forEach((d: string) => deps.add(d));
+        return [id, [...deps]];
+      }),
+    );
+    const state: Record<string, "visiting" | "done"> = {};
+    const visit = (id: string, path: string[]): void => {
+      if (state[id] === "done") return;
+      if (state[id] === "visiting")
+        throw new Error(`dependency cycle: ${[...path, id].join(" -> ")}`);
+      state[id] = "visiting";
+      edges[id].forEach((d) => visit(d, [...path, id]));
+      state[id] = "done";
+    };
+    expect(() =>
+      Object.keys(edges).forEach((id) => visit(id, [])),
+    ).not.toThrow();
+  });
+
+  test("no pre-token-generation Lambda in OIDC mode", () => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    const oidc = Template.fromStack(
+      new IdpAuthenticationStack(app, "QuickOidc", {
+        idpType: IdpType.OIDC,
+        oidcSettings: { issuerUrl: "https://idp.example.com", clientId: "abc" },
+      }),
+    );
+    expect(Object.keys(preTokenGenerationFunctions(oidc))).toHaveLength(0);
   });
 });

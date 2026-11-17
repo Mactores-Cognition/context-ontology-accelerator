@@ -3,9 +3,13 @@
 
 import * as cdk from "aws-cdk-lib";
 import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { SCLStack } from "../../constructs/scl-stack";
+import { fromRoot } from "../../paths";
 import { UserPoolUser } from "../../constructs/user-pool-user";
 import { resolveContext } from "../../context";
 import {
@@ -109,6 +113,9 @@ export class IdpAuthenticationStack extends SCLStack {
       ...(cfg.refreshTokenValidityHours && {
         refreshTokenValidity: cdk.Duration.hours(cfg.refreshTokenValidityHours),
       }),
+      ...(cfg.quickRedirectUrls && {
+        quickRedirectUrls: cfg.quickRedirectUrls,
+      }),
     };
   }
 
@@ -208,6 +215,10 @@ export class IdpAuthenticationStack extends SCLStack {
       throw new Error("callbackUrls must be a non-empty array of HTTPS URLs");
     if (!logoutUrls.length || !logoutUrls.every((u) => /^https:\/\/.+/.test(u)))
       throw new Error("logoutUrls must be a non-empty array of HTTPS URLs");
+
+    const quickRedirectUrls = props?.quickRedirectUrls ?? [];
+    if (!quickRedirectUrls.every((u) => /^https:\/\/.+/.test(u)))
+      throw new Error("quickRedirectUrls must be HTTPS URLs");
 
     this.userPool = new cognito.UserPool(this, "UserPool", {
       userPoolName: this.prefixed("user-pool"),
@@ -316,7 +327,12 @@ export class IdpAuthenticationStack extends SCLStack {
           cognito.OAuthScope.EMAIL,
           cognito.OAuthScope.PROFILE,
         ],
-        callbackUrls: ["http://localhost:9876/oauth/callback"],
+        // Amazon Quick's MCP integration (user authentication) signs users in
+        // through this client too, so its redirect URLs are allowed here.
+        callbackUrls: [
+          "http://localhost:9876/oauth/callback",
+          ...quickRedirectUrls,
+        ],
         logoutUrls: ["http://localhost:9876/"],
       },
       preventUserExistenceErrors: true,
@@ -368,6 +384,62 @@ export class IdpAuthenticationStack extends SCLStack {
       parameterName: `${ssmPrefix}/authentication-group-token-name`,
       stringValue: DEFAULT_GROUP_CLAIM,
     });
+
+    // ── Pre-token-generation trigger (MCP client access tokens) ────
+    // MCP clients that sign in with OAuth (e.g. Amazon Quick) send the access
+    // token. COA's checks need aud = a COA client ID and the caller's email,
+    // and Cognito access tokens carry neither. This trigger adds both, only
+    // for the MCP app client (infra/lambda/pre-token-generation/index.py).
+    // Access-token customization needs event version V2_0 and the Essentials
+    // feature plan (set on the user pool above).
+    const mcpClientIdParamName = `${ssmPrefix}/mcp-client-id`;
+    const preTokenGenerationFn = new lambda.Function(
+      this,
+      "PreTokenGenerationFn",
+      {
+        functionName: this.prefixed("pre-token-generation"),
+        runtime: lambda.Runtime.PYTHON_3_12,
+        architecture: lambda.Architecture.ARM_64,
+        handler: "index.handler",
+        code: lambda.Code.fromAsset(
+          fromRoot("infra/lambda/pre-token-generation"),
+        ),
+        timeout: cdk.Duration.seconds(5),
+        // Cognito waits about 5 s for the trigger, and a failed trigger fails
+        // the sign-in for every app client. At 128 MB a cold start (boto3
+        // client + SSM read) took 2.1 to 2.6 s; 256 MB gives it twice the CPU.
+        memorySize: 256,
+        environment: { MCP_CLIENT_ID_PARAM: mcpClientIdParamName },
+        // Own log group, so logs expire and are removed with the stack
+        // (Lambda's implicit log group is kept forever and left behind).
+        logGroup: new logs.LogGroup(this, "PreTokenGenerationLogGroup", {
+          retention: logs.RetentionDays.ONE_MONTH,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+    // The parameter ARN is built from its name, not from the SsmMcpClientId
+    // construct: referencing the construct would close a dependency cycle
+    // (user pool -> trigger -> role policy -> parameter -> MCP client -> user
+    // pool). For the same reason the function reads the client ID from SSM at
+    // run time instead of getting it as an environment variable.
+    preTokenGenerationFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [
+          this.formatArn({
+            service: "ssm",
+            resource: "parameter",
+            resourceName: mcpClientIdParamName.replace(/^\//, ""),
+          }),
+        ],
+      }),
+    );
+    this.userPool.addTrigger(
+      cognito.UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG,
+      preTokenGenerationFn,
+      cognito.LambdaVersion.V2_0,
+    );
 
     new cdk.CfnOutput(this, "IdpType", { value: idpType });
     new cdk.CfnOutput(this, "UserPoolId", { value: this.userPool.userPoolId });
